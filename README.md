@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml/badge.svg)](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml)
 
-面向中国大陆网络的 JVM 工具版本管理器。思路接近 SDKMAN：在线列版本、下载解压、保存多版本、按终端或项目切换；区别是只接入可脚本化的国内稳定源，并原生支持 Linux、macOS、Windows。
+面向国内网络的 JVM 工具版本管理器。思路接近 SDKMAN：在线列版本、下载解压、保存多版本、按终端或项目切换；区别是只接入可脚本化的国内稳定源，并原生支持 Linux、macOS、Windows。
 
 ## 当前支持
 
