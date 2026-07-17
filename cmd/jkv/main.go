@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"jkv/internal/catalog"
 	"jkv/internal/store"
@@ -35,28 +35,32 @@ func run(ctx context.Context, args []string) error {
 		return cmdList(ctx, s, args[1:])
 	case "install", "i":
 		return cmdInstall(ctx, s, args[1:])
-	case "use":
+	case "use", "u":
 		return cmdUse(s, args[1:])
-	case "default":
+	case "default", "d":
 		return cmdDefault(s, args[1:])
-	case "current":
+	case "current", "c":
 		return cmdCurrent(s, args[1:])
 	case "uninstall", "rm":
 		return cmdUninstall(s, args[1:])
-	case "home":
+	case "home", "h":
 		return cmdHome(s, args[1:])
-	case "env":
+	case "env", "e":
 		return cmdEnv(s, args[1:])
-	case "init":
+	case "init", "in":
 		return cmdInit(args[1:])
-	case "mirror":
+	case "mirror", "m":
 		return cmdMirror(args[1:])
-	case "version", "--version", "-v":
+	case "clean", "cl":
+		return cmdClean(s, args[1:])
+	case "version", "v", "--version", "-v":
 		fmt.Println("jkv", version)
 		return nil
 	case "help", "-h", "--help":
 		usage()
 		return nil
+	case "__complete":
+		return cmdComplete(ctx, s, args[1:])
 	default:
 		return fmt.Errorf("未知命令 %q；运行 jkv help", args[0])
 	}
@@ -66,16 +70,19 @@ func usage() {
 	fmt.Print(`jkv - 中国网络友好、跨平台 JVM 工具版本管理器
 
 用法:
-  jkv list [candidate]              列出候选工具或在线版本
-  jkv install <candidate> [version] 安装版本；支持 21-tem 等别名
-  jkv use <candidate> <version>     当前终端切换（需加载 shell hook）
-  jkv default <candidate> <version> 设置默认版本
-  jkv current                       显示当前生效版本
-  jkv uninstall <candidate> <ver>   卸载版本
-  jkv home <candidate> [version]    输出安装目录
-  jkv env [init|apply|clear]        项目 .jkvrc 环境
-  jkv init <bash|zsh|powershell>    输出 shell hook
-  jkv mirror <maven|gradle|status>  配置国内依赖镜像
+  jkv list|ls [candidate] [--refresh]  列出工具或在线版本
+  jkv install|i <candidate> [version]  安装版本；支持 21-tem 等别名
+  jkv use|u <candidate> <version>      当前终端切换（需 shell hook）
+  jkv default|d <candidate> <version>  设置默认版本
+  jkv current|c [candidate]            显示当前生效版本
+  jkv uninstall|rm <candidate> <ver>   卸载版本
+  jkv home|h <candidate> [version]     输出安装目录
+  jkv env|e [init|apply|clear]          项目 .jkvrc 环境
+  jkv init|in <bash|zsh|powershell>     输出 shell hook 和补全
+  jkv mirror|m <maven|gradle|status>    配置国内依赖镜像
+  jkv clean|cl [downloads|catalog]      清理本地缓存
+  jkv version|v                         显示版本
+  jkv help                              显示帮助
 
 例:
   jkv list java
@@ -86,20 +93,33 @@ func usage() {
 `)
 }
 
+const catalogCacheTTL = 6 * time.Hour
+
 func cmdList(ctx context.Context, s *store.Store, args []string) error {
-	if len(args) == 0 {
+	refresh := false
+	var positional []string
+	for _, arg := range args {
+		if arg == "--refresh" {
+			refresh = true
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) == 0 {
 		fmt.Printf("%-12s %-36s %-22s %s\n", "CANDIDATE", "说明", "国内源", "平台")
 		for _, c := range catalog.Candidates {
 			fmt.Printf("%-12s %-36s %-22s %s\n", c.Name, c.Description, c.Source, c.Platforms)
 		}
 		return nil
 	}
-	candidate := args[0]
+	if len(positional) != 1 {
+		return errors.New("用法: jkv list [candidate] [--refresh]")
+	}
+	candidate := positional[0]
 	if !catalog.IsCandidate(candidate) {
 		return fmt.Errorf("不支持 candidate %q", candidate)
 	}
-	fmt.Fprintf(os.Stderr, "读取国内镜像目录...\n")
-	releases, err := catalog.NewClient().List(ctx, candidate, catalog.CurrentPlatform())
+	releases, err := loadReleases(ctx, s, candidate, refresh, true, false)
 	if err != nil {
 		return err
 	}
@@ -112,18 +132,124 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 	if len(releases) == 0 {
 		return fmt.Errorf("当前平台 %s/%s 暂无稳定国内源", runtime.GOOS, runtime.GOARCH)
 	}
-	fmt.Printf("%-32s %-14s %-10s %s\n", "VERSION", "VENDOR", "STATUS", "SOURCE")
-	for _, r := range releases {
-		status := ""
-		if installedSet[r.Version] {
-			status = "installed"
+	groups := releaseGroups(candidate, releases)
+	for groupIndex, group := range groups {
+		if groupIndex > 0 {
+			fmt.Println()
 		}
-		if defaults[candidate] == r.Version {
-			status = "default"
+		fmt.Println(vendorDisplay(group.vendor))
+		fmt.Println(strings.Repeat("-", 78))
+		fmt.Printf("%-32s %-11s %-10s %s\n", "VERSION", "STATUS", "AVAILABLE", "SOURCE")
+		for _, r := range group.releases {
+			status := ""
+			if installedSet[r.Version] {
+				status = "installed"
+			}
+			if defaults[candidate] == r.Version {
+				status = "default"
+			}
+			if os.Getenv(currentVar(candidate)) == r.Version {
+				status = "current"
+			}
+			available := "×"
+			if r.Available {
+				available = "√"
+			}
+			fmt.Printf("%-32s %-11s %-10s %s\n", r.Version, status, available, hostOf(r.URL))
 		}
-		fmt.Printf("%-32s %-14s %-10s %s\n", r.Version, r.Vendor, status, hostOf(r.URL))
 	}
 	return nil
+}
+
+type releaseGroup struct {
+	vendor   string
+	releases []catalog.Release
+}
+
+func releaseGroups(candidate string, releases []catalog.Release) []releaseGroup {
+	byVendor := map[string][]catalog.Release{}
+	for _, release := range releases {
+		byVendor[release.Vendor] = append(byVendor[release.Vendor], release)
+	}
+	var order []string
+	if candidate == "java" {
+		order = []string{"temurin", "dragonwell", "bisheng"}
+		known := map[string]bool{"temurin": true, "dragonwell": true, "bisheng": true}
+		for _, vendor := range sortedKeys(byVendor) {
+			if !known[vendor] {
+				order = append(order, vendor)
+			}
+		}
+	} else {
+		order = sortedKeys(byVendor)
+	}
+	var groups []releaseGroup
+	for _, vendor := range order {
+		if len(byVendor[vendor]) > 0 {
+			groups = append(groups, releaseGroup{vendor: vendor, releases: byVendor[vendor]})
+		}
+	}
+	return groups
+}
+
+func vendorDisplay(vendor string) string {
+	if display := map[string]string{"temurin": "Temurin", "dragonwell": "Alibaba Dragonwell", "bisheng": "Huawei BiSheng"}[vendor]; display != "" {
+		return display
+	}
+	return vendor
+}
+
+func loadReleases(ctx context.Context, s *store.Store, candidate string, refresh, check, quiet bool) ([]catalog.Release, error) {
+	platform := catalog.CurrentPlatform()
+	now := time.Now()
+	cached, cacheErr := s.LoadCatalog(platform, candidate)
+	hasCache := cacheErr == nil && len(cached.Releases) > 0
+	client := catalog.NewClient()
+	refreshFailed := false
+	if refresh || !hasCache || now.Sub(cached.FetchedAt) >= catalogCacheTTL {
+		if !quiet {
+			fmt.Fprintln(os.Stderr, "读取国内镜像目录...")
+		}
+		releases, err := client.List(ctx, candidate, platform)
+		if err != nil {
+			if !hasCache {
+				return nil, err
+			}
+			refreshFailed = true
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "刷新失败，使用本地缓存: %v\n", err)
+			}
+		} else {
+			cached = store.CatalogCache{FetchedAt: now, Releases: releases}
+			hasCache = true
+		}
+	}
+	if !hasCache {
+		return nil, errors.New("无可用版本缓存")
+	}
+	needsCheck := check && (refresh || cached.CheckedAt.IsZero() || now.Sub(cached.CheckedAt) >= catalogCacheTTL)
+	if needsCheck && (!refreshFailed || releasesNeedCheck(cached.Releases)) {
+		if !quiet {
+			fmt.Fprintln(os.Stderr, "检查下载地址...")
+		}
+		cached.Releases = client.CheckAvailability(ctx, cached.Releases)
+		cached.CheckedAt = now
+	}
+	if !refreshFailed || needsCheck {
+		if err := s.SaveCatalog(platform, candidate, cached); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "写入版本缓存失败: %v\n", err)
+		}
+	}
+	return cached.Releases, nil
+}
+
+func releasesNeedCheck(releases []catalog.Release) bool {
+	for _, release := range releases {
+		if !release.AvailabilityKnown {
+			return true
+		}
+	}
+	return false
 }
 
 func hostOf(raw string) string {
@@ -135,12 +261,18 @@ func hostOf(raw string) string {
 }
 
 func cmdInstall(ctx context.Context, s *store.Store, args []string) error {
-	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	setDefault := fs.Bool("default", false, "设为默认")
-	if err := fs.Parse(args); err != nil {
-		return err
+	setDefault := false
+	var pos []string
+	for _, arg := range args {
+		if arg == "--default" {
+			setDefault = true
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			return fmt.Errorf("install 不支持选项 %q", arg)
+		}
+		pos = append(pos, arg)
 	}
-	pos := fs.Args()
 	if len(pos) < 1 || len(pos) > 2 {
 		return errors.New("用法: jkv install <candidate> [version] [--default]")
 	}
@@ -152,21 +284,29 @@ func cmdInstall(ctx context.Context, s *store.Store, args []string) error {
 	if len(pos) == 2 {
 		want = pos[1]
 	}
-	fmt.Fprintln(os.Stderr, "解析国内镜像版本...")
-	releases, err := catalog.NewClient().List(ctx, candidate, catalog.CurrentPlatform())
-	if err != nil {
-		return err
+	var r catalog.Release
+	var err error
+	foundCached := false
+	if want != "" && want != "latest" {
+		r, foundCached = s.CachedRelease(candidate, want)
 	}
-	r, err := selectRelease(releases, want)
-	if err != nil {
-		return err
+	if !foundCached {
+		fmt.Fprintln(os.Stderr, "解析国内镜像版本...")
+		releases, loadErr := loadReleases(ctx, s, candidate, false, false, false)
+		if loadErr != nil {
+			return loadErr
+		}
+		r, err = selectRelease(releases, want)
+		if err != nil {
+			return err
+		}
 	}
 	fmt.Fprintf(os.Stderr, "安装 %s %s，来源 %s\n", candidate, r.Version, hostOf(r.URL))
 	if err := s.Install(ctx, r, os.Stderr); err != nil {
 		return err
 	}
 	defaults, _ := s.Defaults()
-	if *setDefault || defaults[candidate] == "" {
+	if setDefault || defaults[candidate] == "" {
 		if err := s.SetDefault(candidate, r.Version); err != nil {
 			return err
 		}
@@ -248,6 +388,7 @@ func cmdUse(s *store.Store, args []string) error {
 	if shell == "" {
 		return fmt.Errorf("二进制无法修改父进程环境；先加载: eval \"$(jkv init %s)\"", guessedShell())
 	}
+	fmt.Fprintf(os.Stderr, "已切换当前终端: %s %s\n", args[0], v)
 	return printEnv(s, map[string]string{args[0]: v}, shell, false)
 }
 
@@ -267,9 +408,10 @@ func cmdDefault(s *store.Store, args []string) error {
 		return err
 	}
 	if shell != "" {
+		fmt.Fprintf(os.Stderr, "已设置默认版本: %s %s\n", args[0], v)
 		return printEnv(s, map[string]string{args[0]: v}, shell, false)
 	}
-	fmt.Printf("默认版本: %s %s\n", args[0], v)
+	fmt.Printf("已设置默认版本: %s %s\n", args[0], v)
 	return nil
 }
 
@@ -485,23 +627,58 @@ func cmdInit(args []string) error {
 		return errors.New("用法: jkv init <bash|zsh|powershell>")
 	}
 	switch args[0] {
-	case "bash", "zsh":
+	case "bash":
 		fmt.Printf(`jkv() {
   case "$1" in
-    use|default) eval "$(command jkv "$@" --shell %s)" ;;
-    env)
+    use|u|default|d) eval "$(command jkv "$@" --shell bash)" ;;
+    env|e)
       if [ "${2:-}" = "init" ]; then command jkv "$@"; else eval "$(command jkv "$@" --shell %s)"; fi ;;
     *) command jkv "$@" ;;
   esac
 }
-eval "$(command jkv env --shell %s)"
-`, args[0], args[0], args[0])
+_jkv_complete() {
+  local -a words
+  words=( "${COMP_WORDS[@]:1:COMP_CWORD}" )
+  COMPREPLY=()
+  while IFS= read -r item; do COMPREPLY+=( "$item" ); done < <(command jkv __complete "${words[@]}")
+}
+complete -F _jkv_complete jkv
+eval "$(command jkv env --shell bash)"
+`, args[0])
+	case "zsh":
+		fmt.Print(`jkv() {
+  case "$1" in
+    use|u|default|d) eval "$(command jkv "$@" --shell zsh)" ;;
+    env|e)
+      if [ "${2:-}" = "init" ]; then command jkv "$@"; else eval "$(command jkv "$@" --shell zsh)"; fi ;;
+    *) command jkv "$@" ;;
+  esac
+}
+_jkv_complete() {
+  local -a replies
+  replies=("${(@f)$(command jkv __complete "${(@)words[2,CURRENT]}")}")
+  compadd -- "${replies[@]}"
+}
+if (( ! $+functions[compdef] )); then
+  autoload -Uz compinit && compinit
+fi
+compdef _jkv_complete jkv
+eval "$(command jkv env --shell zsh)"
+`)
 	case "powershell", "pwsh":
 		fmt.Printf(`function jkv {
-  if ($args[0] -in @('use','default') -or ($args[0] -eq 'env' -and $args[1] -ne 'init')) {
+  if ($args[0] -in @('use','u','default','d') -or ($args[0] -in @('env','e') -and $args[1] -ne 'init')) {
     $code = & (Join-Path $env:JKV_DIR 'bin/jkv.exe') @args --shell powershell
     if ($LASTEXITCODE -eq 0) { Invoke-Expression ($code -join "%cn") }
   } else { & (Join-Path $env:JKV_DIR 'bin/jkv.exe') @args }
+}
+Register-ArgumentCompleter -CommandName jkv -ScriptBlock {
+  param($commandName, $wordToComplete, $cursorPosition, $commandAst, $fakeBoundParameters)
+  $tokens = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.Extent.Text })
+  if ($commandAst.Extent.Text.EndsWith(' ')) { $tokens += '' }
+  & (Join-Path $env:JKV_DIR 'bin/jkv.exe') __complete @tokens | ForEach-Object {
+    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+  }
 }
 Invoke-Expression ((& (Join-Path $env:JKV_DIR 'bin/jkv.exe') env --shell powershell) -join "%cn")
 `, '`', '`')
@@ -579,6 +756,53 @@ allprojects {
 		return fmt.Errorf("不支持镜像配置 %q", args[0])
 	}
 	return nil
+}
+
+func cmdClean(s *store.Store, args []string) error {
+	if len(args) > 3 {
+		return errors.New("用法: jkv clean [downloads [candidate [version]]|catalog [candidate]]")
+	}
+	kind, candidate, version := "", "", ""
+	if len(args) > 0 {
+		kind = args[0]
+	}
+	if kind != "" && kind != "downloads" && kind != "catalog" {
+		return fmt.Errorf("不支持缓存类型 %q", kind)
+	}
+	if len(args) > 1 {
+		candidate = args[1]
+		if !catalog.IsCandidate(candidate) {
+			return fmt.Errorf("不支持 candidate %q", candidate)
+		}
+	}
+	if len(args) > 2 {
+		if kind != "downloads" {
+			return errors.New("catalog 清理不支持 version 参数")
+		}
+		version = args[2]
+	}
+	result, err := s.CleanCache(kind, candidate, version)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("已清理 %d 个文件，释放 %s\n", result.Files, formatBytes(result.Bytes))
+	return nil
+}
+
+func formatBytes(n int64) string {
+	const unit = int64(1024)
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	value := float64(n)
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	for _, suffix := range units {
+		value /= 1024
+		if value < 1024 || suffix == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 func writeConfig(path, content string) error {

@@ -62,17 +62,18 @@ Invoke-Expression ((jkv init powershell) -join [Environment]::NewLine)
 ## 使用
 
 ```sh
-jkv list
-jkv list java
-jkv install java 21-tem
+jkv list                         # 简写: jkv ls
+jkv list java                    # 按 vendor 分组，显示下载可用性 √/×
+jkv list java --refresh          # 忽略 6 小时缓存并刷新
+jkv install java 21-tem          # 简写: jkv i java 21-tem
 jkv install java 17-dragonwell
 jkv install java 21-bisheng
 jkv install maven
 jkv install gradle 8.14.3
 
-jkv use java 17-dragonwell       # 当前终端
-jkv default java 21-tem          # 新终端默认
-jkv current
+jkv use java 17-dragonwell       # 当前终端；简写: jkv u
+jkv default java 21-tem          # 新终端默认；简写: jkv d
+jkv current                      # 简写: jkv c
 jkv home java
 jkv uninstall java 17-dragonwell
 ```
@@ -92,6 +93,51 @@ jkv env clear         # 恢复默认版本
 ```properties
 java=21.0.11+10-tem
 maven=3.9.16
+```
+
+### 命令简写与补全
+
+| 命令 | 简写 | 命令 | 简写 |
+|---|---|---|---|
+| `list` | `ls` | `install` | `i` |
+| `use` | `u` | `default` | `d` |
+| `current` | `c` | `uninstall` | `rm` |
+| `home` | `h` | `env` | `e` |
+| `init` | `in` | `mirror` | `m` |
+| `clean` | `cl` | `version` | `v` |
+
+`jkv init bash`、`jkv init zsh` 和 `jkv init powershell` 会同时注册 shell hook 与动态补全。命令和简写共享补全规则：
+
+| 输入位置 | 补全内容 |
+|---|---|
+| `list/ls`、`install/i`、`use/u`、`default/d`、`current/c`、`uninstall/rm`、`home/h` | 全部 candidate |
+| `install/i <candidate>` | 在线版本、下载缓存版本、`latest` |
+| `use/u`、`default/d`、`uninstall/rm`、`home/h <candidate>` | 已安装版本 |
+| `clean/cl` | 缓存类型、全部 candidate、下载缓存版本 |
+| `env/e`、`init/in`、`mirror/m` | 动作、shell、选项 |
+
+版本补全适用于 Java、Maven、Gradle、Ant、Groovy、JMeter、Tomcat 和 Spring Boot CLI，不写死具体包名：
+
+```sh
+jkv install java <Tab>      # JDK 在线及已缓存版本
+jkv i maven <Tab>           # Maven 在线及已缓存版本
+jkv default gradle <Tab>    # 已安装 Gradle 版本
+jkv rm tomcat <Tab>         # 已安装 Tomcat 版本
+```
+
+首次补全在线版本时会读取镜像元数据；后续使用本地缓存。补全不会探测下载地址。
+
+### 本地缓存
+
+版本目录和下载可用性缓存位于 `$JKV_DIR/cache/catalog/`，有效期 6 小时。缓存过期时自动刷新；网络失败会回退到旧缓存。使用 `jkv list <candidate> --refresh` 强制刷新。
+
+安装压缩包保存在 `$JKV_DIR/cache/downloads/`。`uninstall` 只删除解压后的安装目录；再次安装同一精确版本时会校验并复用下载包。
+
+```sh
+jkv clean                              # 清理全部缓存
+jkv clean downloads                    # 只清下载包
+jkv clean downloads java 21.0.11+10-tem
+jkv clean catalog java                 # 只清 Java 版本缓存
 ```
 
 ## Maven / Gradle 依赖镜像

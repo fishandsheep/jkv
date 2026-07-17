@@ -2,6 +2,8 @@ package catalog
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -32,5 +34,41 @@ func TestDragonwellLive(t *testing.T) {
 	}
 	if len(r) < 4 {
 		t.Fatalf("expected Dragonwell releases, got %#v", r)
+	}
+}
+
+func TestCheckAvailability(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			w.WriteHeader(http.StatusOK)
+		case "/range":
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			if r.Header.Get("Range") != "bytes=0-0" {
+				t.Errorf("Range = %q", r.Header.Get("Range"))
+			}
+			w.WriteHeader(http.StatusPartialContent)
+		case "/missing":
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	releases := []Release{
+		{URL: server.URL + "/ok"},
+		{URL: server.URL + "/range"},
+		{URL: server.URL + "/missing"},
+	}
+	got := (&Client{HTTP: server.Client()}).CheckAvailability(context.Background(), releases)
+	if !got[0].Available || !got[1].Available || got[2].Available {
+		t.Fatalf("availability = %#v", got)
+	}
+	for _, release := range got {
+		if !release.AvailabilityKnown {
+			t.Fatal("availability was not marked as checked")
+		}
 	}
 }

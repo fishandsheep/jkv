@@ -24,11 +24,13 @@ type Platform struct {
 }
 
 type Release struct {
-	Candidate   string
-	Version     string
-	Vendor      string
-	URL         string
-	ChecksumURL string
+	Candidate         string
+	Version           string
+	Vendor            string
+	URL               string
+	ChecksumURL       string
+	Available         bool
+	AvailabilityKnown bool
 }
 
 type Candidate struct {
@@ -128,6 +130,62 @@ func (c *Client) get(ctx context.Context, rawURL string) ([]byte, error) {
 	return b, nil
 }
 
+func (c *Client) CheckAvailability(ctx context.Context, releases []Release) []Release {
+	out := append([]Release(nil), releases...)
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	workers := 12
+	if len(out) < workers {
+		workers = len(out)
+	}
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				out[i].Available = c.downloadAvailable(ctx, out[i].URL)
+				out[i].AvailabilityKnown = true
+			}
+		}()
+	}
+	for i := range out {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	return out
+}
+
+func (c *Client) downloadAvailable(ctx context.Context, rawURL string) bool {
+	check := func(method string, ranged bool) (int, error) {
+		requestCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(requestCtx, method, rawURL, nil)
+		if err != nil {
+			return 0, err
+		}
+		req.Header.Set("User-Agent", "jkv/0.1")
+		if ranged {
+			req.Header.Set("Range", "bytes=0-0")
+		}
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+	status, err := check(http.MethodHead, false)
+	if err == nil && status >= 200 && status < 400 {
+		return true
+	}
+	if err == nil && status != http.StatusForbidden && status != http.StatusMethodNotAllowed && status != http.StatusNotImplemented {
+		return false
+	}
+	status, err = check(http.MethodGet, true)
+	return err == nil && status >= 200 && status < 400
+}
+
 var hrefRE = regexp.MustCompile(`(?i)href\s*=\s*["']?([^"' >]+)`)
 
 func links(body []byte) []string {
@@ -218,7 +276,7 @@ func (c *Client) temurin(ctx context.Context, p Platform) ([]Release, error) {
 				v := regexp.MustCompile(`hotspot_([^/]+?)(?:\.tar\.gz|\.zip)$`).FindStringSubmatch(link)
 				if len(v) == 2 {
 					version := strings.Replace(v[1], "_", "+", 1) + "-tem"
-					ch <- result{Release{"java", version, "temurin", resolve(base, link), ""}}
+					ch <- result{Release{Candidate: "java", Version: version, Vendor: "temurin", URL: resolve(base, link)}}
 				}
 			}
 		}()
@@ -255,7 +313,7 @@ func (c *Client) dragonwell(ctx context.Context, p Platform) ([]Release, error) 
 		}
 		u, _ := standard[key].(string)
 		if v != "" && v != "0" && u != "" {
-			out = append(out, Release{"java", v + "-dragonwell", "dragonwell", u, ""})
+			out = append(out, Release{Candidate: "java", Version: v + "-dragonwell", Vendor: "dragonwell", URL: u})
 		}
 	}
 	return out, nil
@@ -288,7 +346,7 @@ func dragonwellFallback(p Platform) []Release {
 		}
 		name := fmt.Sprintf("Alibaba_Dragonwell_Standard_%s_%s_%s%s", versions[major], arch, osName, ext)
 		u := "https://dragonwell.oss-cn-shanghai.aliyuncs.com/" + buildPaths[major] + "/" + name
-		out = append(out, Release{"java", versions[major] + "-dragonwell", "dragonwell", u, ""})
+		out = append(out, Release{Candidate: "java", Version: versions[major] + "-dragonwell", Vendor: "dragonwell", URL: u})
 	}
 	return out
 }
@@ -313,7 +371,7 @@ func (c *Client) bisheng(ctx context.Context, p Platform) ([]Release, error) {
 		if strings.HasPrefix(m[1], "8u") {
 			major = "8"
 		}
-		r := Release{"java", m[1] + "-bisheng", "bisheng", resolve(base, link), resolve(base, link+".sha256")}
+		r := Release{Candidate: "java", Version: m[1] + "-bisheng", Vendor: "bisheng", URL: resolve(base, link), ChecksumURL: resolve(base, link+".sha256")}
 		if old, ok := best[major]; !ok || versionLess(old.Version, r.Version) {
 			best[major] = r
 		}
@@ -335,7 +393,7 @@ func (c *Client) gradle(ctx context.Context) ([]Release, error) {
 	var out []Release
 	for _, link := range links(body) {
 		if m := re.FindStringSubmatch(link); len(m) == 2 {
-			out = append(out, Release{"gradle", m[1], "gradle", resolve(base, link), ""})
+			out = append(out, Release{Candidate: "gradle", Version: m[1], Vendor: "gradle", URL: resolve(base, link)})
 		}
 	}
 	return uniqueSorted(out, 30), nil
@@ -347,20 +405,21 @@ func (c *Client) maven(ctx context.Context, p Platform) ([]Release, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []Release
+	var bases []string
 	for _, dir := range links(body) {
 		if !regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)+/$`).MatchString(dir) {
 			continue
 		}
-		base := resolve(root, dir+"binaries/")
-		b, e := c.get(ctx, base)
-		if e != nil {
-			continue
+		bases = append(bases, resolve(root, dir+"binaries/"))
+	}
+	return parallelReleases(bases, 8, func(base string) []Release {
+		b, err := c.get(ctx, base)
+		if err != nil {
+			return nil
 		}
 		r, _ := c.archivesFromBody("maven", base, b, `apache-maven-([0-9][0-9A-Za-z.+-]*)-bin`, p, false)
-		out = append(out, r...)
-	}
-	return out, nil
+		return r
+	}), nil
 }
 
 func (c *Client) flatArchives(ctx context.Context, candidate, base, pattern string, p Platform, zipOnly bool) ([]Release, error) {
@@ -393,7 +452,7 @@ func (c *Client) archivesFromBody(candidate, base string, body []byte, pattern s
 				continue
 			}
 		}
-		byVersion[m[2]] = Release{candidate, m[2], candidate, resolve(base, link), ""}
+		byVersion[m[2]] = Release{Candidate: candidate, Version: m[2], Vendor: candidate, URL: resolve(base, link)}
 	}
 	var out []Release
 	for _, r := range byVersion {
@@ -408,23 +467,26 @@ func (c *Client) groovy(ctx context.Context) ([]Release, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []Release
+	var versions []string
 	for _, dir := range links(body) {
 		v := strings.TrimSuffix(dir, "/")
 		if !regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)+$`).MatchString(v) || !stableVersion(v) {
 			continue
 		}
-		base := resolve(root, dir+"distribution/")
-		b, e := c.get(ctx, base)
-		if e != nil {
-			continue
+		versions = append(versions, v)
+	}
+	return parallelReleases(versions, 8, func(v string) []Release {
+		base := resolve(root, v+"/distribution/")
+		b, err := c.get(ctx, base)
+		if err != nil {
+			return nil
 		}
 		name := "apache-groovy-binary-" + v + ".zip"
 		if strings.Contains(string(b), name) {
-			out = append(out, Release{"groovy", v, "groovy", resolve(base, name), ""})
+			return []Release{{Candidate: "groovy", Version: v, Vendor: "groovy", URL: resolve(base, name)}}
 		}
-	}
-	return out, nil
+		return nil
+	}), nil
 }
 
 func (c *Client) tomcat(ctx context.Context, p Platform) ([]Release, error) {
@@ -433,7 +495,7 @@ func (c *Client) tomcat(ctx context.Context, p Platform) ([]Release, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []Release
+	var bases []string
 	for _, branch := range links(body) {
 		if !regexp.MustCompile(`^tomcat-(9|10|11)/$`).MatchString(branch) {
 			continue
@@ -448,16 +510,17 @@ func (c *Client) tomcat(ctx context.Context, p Platform) ([]Release, error) {
 			if !regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)+$`).MatchString(v) {
 				continue
 			}
-			base := resolve(branchURL, dir+"bin/")
-			bb, e := c.get(ctx, base)
-			if e != nil {
-				continue
-			}
-			r, _ := c.archivesFromBody("tomcat", base, bb, `apache-tomcat-([0-9]+(?:\.[0-9]+)+)`, p, false)
-			out = append(out, r...)
+			bases = append(bases, resolve(branchURL, dir+"bin/"))
 		}
 	}
-	return out, nil
+	return parallelReleases(bases, 8, func(base string) []Release {
+		b, err := c.get(ctx, base)
+		if err != nil {
+			return nil
+		}
+		r, _ := c.archivesFromBody("tomcat", base, b, `apache-tomcat-([0-9]+(?:\.[0-9]+)+)`, p, false)
+		return r
+	}), nil
 }
 
 func (c *Client) springboot(ctx context.Context) ([]Release, error) {
@@ -476,7 +539,7 @@ func (c *Client) springboot(ctx context.Context) ([]Release, error) {
 	for _, v := range m.Versions {
 		if stableVersion(v) {
 			u := root + v + "/spring-boot-cli-" + v + "-bin.zip"
-			out = append(out, Release{"springboot", v, "spring", u, ""})
+			out = append(out, Release{Candidate: "springboot", Version: v, Vendor: "spring", URL: u})
 		}
 	}
 	return uniqueSorted(out, 30), nil
@@ -496,6 +559,34 @@ func uniqueSorted(in []Release, limit int) []Release {
 	sort.SliceStable(out, func(i, j int) bool { return versionLess(out[j].Version, out[i].Version) })
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
+	}
+	return out
+}
+
+func parallelReleases[T any](items []T, limit int, fn func(T) []Release) []Release {
+	if limit < 1 {
+		limit = 1
+	}
+	sem := make(chan struct{}, limit)
+	results := make(chan []Release, len(items))
+	var wg sync.WaitGroup
+	for _, item := range items {
+		item := item
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			results <- fn(item)
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	var out []Release
+	for releases := range results {
+		out = append(out, releases...)
 	}
 	return out
 }

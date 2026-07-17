@@ -89,21 +89,15 @@ func (s *Store) Install(ctx context.Context, r catalog.Release, progress io.Writ
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
+	archive, err := s.obtainArchive(ctx, r, progress)
+	if err != nil {
+		return err
+	}
 	tmpRoot, err := os.MkdirTemp(filepath.Dir(dest), ".jkv-install-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpRoot)
-	archive := filepath.Join(tmpRoot, "download")
-	sum, err := s.download(ctx, r.URL, archive, progress)
-	if err != nil {
-		return err
-	}
-	if r.ChecksumURL != "" {
-		if err := s.verifyChecksum(ctx, r.ChecksumURL, sum); err != nil {
-			return err
-		}
-	}
 	extract := filepath.Join(tmpRoot, "extract")
 	if err := os.MkdirAll(extract, 0o755); err != nil {
 		return err
@@ -134,6 +128,53 @@ func (s *Store) Install(ctx context.Context, r catalog.Release, progress io.Writ
 		return err
 	}
 	return nil
+}
+
+func (s *Store) obtainArchive(ctx context.Context, r catalog.Release, progress io.Writer) (string, error) {
+	if archive, ok := s.validCachedArchive(r); ok {
+		if progress != nil {
+			fmt.Fprintln(progress, "使用本地下载缓存")
+		}
+		return archive, nil
+	}
+	archive, _, ok := s.archivePaths(r.Candidate, r.Version)
+	if !ok {
+		return "", errors.New("无效 candidate 或版本")
+	}
+	if err := os.MkdirAll(filepath.Dir(archive), 0o755); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(archive), ".jkv-download-")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Remove(tmpPath); err != nil {
+		return "", err
+	}
+	defer os.Remove(tmpPath)
+	sum, err := s.download(ctx, r.URL, tmpPath, progress)
+	if err != nil {
+		return "", err
+	}
+	if r.ChecksumURL != "" {
+		if err := s.verifyChecksum(ctx, r.ChecksumURL, sum); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.Rename(tmpPath, archive); err != nil {
+		return "", err
+	}
+	if err := s.saveArchiveMetadata(r, sum); err != nil {
+		return "", err
+	}
+	return archive, nil
 }
 
 func (s *Store) download(ctx context.Context, rawURL, path string, progress io.Writer) (string, error) {
