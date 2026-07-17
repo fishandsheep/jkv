@@ -28,10 +28,20 @@ if ($buildFromSource) {
     Pop-Location
   }
 } else {
-  $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+  # PROCESSOR_ARCHITEW6432 reports the native architecture when running
+  # 32-bit Windows PowerShell on a 64-bit system.
+  $nativeArch = if ($env:PROCESSOR_ARCHITEW6432) {
+    $env:PROCESSOR_ARCHITEW6432
+  } elseif ($env:PROCESSOR_ARCHITECTURE) {
+    $env:PROCESSOR_ARCHITECTURE
+  } else {
+    [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+  }
+  $arch = switch ($nativeArch.ToUpperInvariant()) {
+    'AMD64' { 'amd64' }
     'X64' { 'amd64' }
-    'Arm64' { 'arm64' }
-    default { throw "不支持架构: $_" }
+    'ARM64' { 'arm64' }
+    default { throw "不支持架构: $nativeArch" }
   }
   $downloadBase = if ($env:JKV_DOWNLOAD_BASE) {
     $env:JKV_DOWNLOAD_BASE.TrimEnd('/')
