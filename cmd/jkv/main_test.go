@@ -266,3 +266,17 @@ func TestCommandAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestShellInitHint(t *testing.T) {
+	tests := map[string]string{
+		"bash":       `eval "$(jkv init bash)"`,
+		"zsh":        `eval "$(jkv init zsh)"`,
+		"powershell": `Invoke-Expression ((jkv init powershell) -join [Environment]::NewLine)`,
+		"pwsh":       `Invoke-Expression ((jkv init powershell) -join [Environment]::NewLine)`,
+	}
+	for shell, want := range tests {
+		if got := shellInitHint(shell); got != want {
+			t.Errorf("shellInitHint(%q) = %q, want %q", shell, got, want)
+		}
+	}
+}
