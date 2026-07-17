@@ -386,7 +386,7 @@ func cmdUse(s *store.Store, args []string) error {
 		return err
 	}
 	if shell == "" {
-		return fmt.Errorf("二进制无法修改父进程环境；先加载: eval \"$(jkv init %s)\"", guessedShell())
+		return fmt.Errorf("二进制无法修改父进程环境；先加载: %s", shellInitHint(guessedShell()))
 	}
 	fmt.Fprintf(os.Stderr, "已切换当前终端: %s %s\n", args[0], v)
 	return printEnv(s, map[string]string{args[0]: v}, shell, false)
@@ -841,6 +841,13 @@ func guessedShell() string {
 		return "zsh"
 	}
 	return "bash"
+}
+
+func shellInitHint(shell string) string {
+	if shell == "powershell" || shell == "pwsh" {
+		return `Invoke-Expression ((jkv init powershell) -join [Environment]::NewLine)`
+	}
+	return fmt.Sprintf(`eval "$(jkv init %s)"`, shell)
 }
 
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
