@@ -5,28 +5,53 @@ $ErrorActionPreference = 'Stop'
 $binDir = Join-Path $InstallDir 'bin'
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
 $target = Join-Path $binDir 'jkv.exe'
-
-if ((Test-Path 'go.mod') -and (Test-Path 'cmd/jkv') -and (Get-Command go -ErrorAction SilentlyContinue)) {
-  Write-Host '从本地源码构建 jkv...'
-  go build -trimpath -ldflags '-s -w' -o $target ./cmd/jkv
+$repo = if ($env:JKV_REPO) { $env:JKV_REPO } else { 'fishandsheep/jkv' }
+$scriptPath = if ($MyInvocation.MyCommand.Name -eq 'install.ps1') {
+  $MyInvocation.MyCommand.Path
 } else {
-  if (-not $env:JKV_REPO) { throw '请设置发布仓库，例如: $env:JKV_REPO="owner/jkv"' }
+  $null
+}
+$sourceRoot = if ($scriptPath) { Split-Path -Parent $scriptPath } else { $null }
+
+$buildFromSource = -not $env:JKV_DOWNLOAD_BASE -and $sourceRoot -and
+  (Test-Path (Join-Path $sourceRoot 'go.mod')) -and
+  (Test-Path (Join-Path $sourceRoot 'cmd/jkv')) -and
+  (Get-Command go -ErrorAction SilentlyContinue)
+
+if ($buildFromSource) {
+  Write-Host '从本地源码构建 jkv...'
+  Push-Location $sourceRoot
+  try {
+    go build -trimpath -ldflags '-s -w' -o $target ./cmd/jkv
+    if ($LASTEXITCODE -ne 0) { throw "go build 失败，退出码 $LASTEXITCODE" }
+  } finally {
+    Pop-Location
+  }
+} else {
   $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     'X64' { 'amd64' }
     'Arm64' { 'arm64' }
     default { throw "不支持架构: $_" }
   }
-  $base = "https://github.com/$($env:JKV_REPO)/releases/latest/download/jkv-windows-$arch.exe"
-  $tmp = [IO.Path]::GetTempFileName()
+  $downloadBase = if ($env:JKV_DOWNLOAD_BASE) {
+    $env:JKV_DOWNLOAD_BASE.TrimEnd('/')
+  } else {
+    "https://github.com/$repo/releases/latest/download"
+  }
+  $asset = "jkv-windows-$arch.exe"
+  $url = "$downloadBase/$asset"
+  $tmp = Join-Path $binDir ".$asset.$([Guid]::NewGuid().ToString('N')).tmp"
+  $sumFile = "$tmp.sha256"
   try {
-    Invoke-WebRequest -UseBasicParsing $base -OutFile $tmp
-    Invoke-WebRequest -UseBasicParsing "$base.sha256" -OutFile "$tmp.sha256"
-    $expected = ((Get-Content "$tmp.sha256" -Raw) -split '\s+')[0]
+    Write-Host "下载 $asset..."
+    Invoke-WebRequest -UseBasicParsing $url -OutFile $tmp
+    Invoke-WebRequest -UseBasicParsing "$url.sha256" -OutFile $sumFile
+    $expected = ((Get-Content $sumFile -Raw) -split '\s+')[0]
     $actual = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLowerInvariant()
     if ($expected.ToLowerInvariant() -ne $actual) { throw 'SHA-256 校验失败' }
     Move-Item -Force $tmp $target
   } finally {
-    Remove-Item -Force -ErrorAction SilentlyContinue $tmp, "$tmp.sha256"
+    Remove-Item -Force -ErrorAction SilentlyContinue $tmp, $sumFile
   }
 }
 

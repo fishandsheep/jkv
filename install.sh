@@ -2,17 +2,21 @@
 set -eu
 
 JKV_DIR=${JKV_DIR:-"$HOME/.jkv"}
+JKV_REPO=${JKV_REPO:-fishandsheep/jkv}
 BIN_DIR="$JKV_DIR/bin"
 mkdir -p "$BIN_DIR"
 
-if [ -f "go.mod" ] && [ -d "cmd/jkv" ] && command -v go >/dev/null 2>&1; then
+source_root=
+case "$0" in
+  */install.sh|install.sh) source_root=$(CDPATH= cd "$(dirname "$0")" && pwd) ;;
+esac
+
+if [ -z "${JKV_DOWNLOAD_BASE:-}" ] && [ -n "$source_root" ] &&
+   [ -f "$source_root/go.mod" ] && [ -d "$source_root/cmd/jkv" ] &&
+   command -v go >/dev/null 2>&1; then
   echo "从本地源码构建 jkv..."
-  go build -trimpath -ldflags "-s -w" -o "$BIN_DIR/jkv" ./cmd/jkv
+  (cd "$source_root" && go build -trimpath -ldflags "-s -w" -o "$BIN_DIR/jkv" ./cmd/jkv)
 else
-  if [ -z "${JKV_REPO:-}" ]; then
-    echo "请设置发布仓库，例如: curl .../install.sh | JKV_REPO=owner/jkv sh" >&2
-    exit 1
-  fi
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   arch=$(uname -m)
   case "$arch" in
@@ -21,16 +25,24 @@ else
     *) echo "不支持架构: $arch" >&2; exit 1 ;;
   esac
   case "$os" in linux|darwin) ;; *) echo "不支持系统: $os" >&2; exit 1 ;; esac
-  base="https://github.com/$JKV_REPO/releases/latest/download/jkv-$os-$arch"
-  tmp=$(mktemp "${TMPDIR:-/tmp}/jkv.XXXXXX")
-  trap 'rm -f "$tmp" "$tmp.sha256"' EXIT INT TERM
-  curl -fL --retry 3 -o "$tmp" "$base"
-  curl -fL --retry 3 -o "$tmp.sha256" "$base.sha256"
-  expected=$(awk '{print $1}' "$tmp.sha256")
+
+  download_base=${JKV_DOWNLOAD_BASE:-"https://github.com/$JKV_REPO/releases/latest/download"}
+  download_base=${download_base%/}
+  asset="jkv-$os-$arch"
+  url="$download_base/$asset"
+  tmp=$(mktemp "$BIN_DIR/.jkv.XXXXXX")
+  sum_file="$tmp.sha256"
+  trap 'rm -f "$tmp" "$sum_file"' EXIT INT TERM
+
+  echo "下载 $asset..."
+  curl -fL --retry 3 -o "$tmp" "$url"
+  curl -fL --retry 3 -o "$sum_file" "$url.sha256"
+  expected=$(awk '{print $1}' "$sum_file")
   if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$tmp" | awk '{print $1}')
   else actual=$(shasum -a 256 "$tmp" | awk '{print $1}'); fi
   [ "$expected" = "$actual" ] || { echo "SHA-256 校验失败" >&2; exit 1; }
-  mv "$tmp" "$BIN_DIR/jkv"
+  chmod 755 "$tmp"
+  mv -f "$tmp" "$BIN_DIR/jkv"
 fi
 chmod 755 "$BIN_DIR/jkv"
 
@@ -49,4 +61,3 @@ fi
 echo "jkv 已安装: $BIN_DIR/jkv"
 echo "重新打开终端，或运行:"
 echo "  export JKV_DIR=\"$JKV_DIR\"; export PATH=\"$BIN_DIR:\$PATH\"; eval \"\$(jkv init $shell_name)\""
-

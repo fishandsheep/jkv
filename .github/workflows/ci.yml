@@ -66,7 +66,7 @@ jobs:
         run: |
           go build -trimpath -o jkv-ci ./cmd/jkv
           ./jkv-ci version
-      - name: Run Unix installer
+      - name: Run Unix source installer
         env:
           HOME: ${{ runner.temp }}/jkv-home
           JKV_DIR: ${{ runner.temp }}/jkv-install
@@ -76,6 +76,50 @@ jobs:
           sh ./install.sh
           "$JKV_DIR/bin/jkv" version
           grep -F '# jkv init' "$HOME/.bashrc"
+      - name: Run Unix binary installer
+        env:
+          HOME: ${{ runner.temp }}/jkv-binary-home
+          JKV_DIR: ${{ runner.temp }}/jkv-binary-install
+          SHELL: /bin/bash
+        run: |
+          fixture="$RUNNER_TEMP/jkv-download"
+          asset="jkv-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "$HOME" "$fixture"
+          go build -trimpath -o "$fixture/$asset" ./cmd/jkv
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$fixture" && sha256sum "$asset" > "$asset.sha256")
+          else
+            (cd "$fixture" && shasum -a 256 "$asset" > "$asset.sha256")
+          fi
+
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$fixture" >"$RUNNER_TEMP/jkv-http.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS "http://127.0.0.1:8765/$asset.sha256" >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            cat "$RUNNER_TEMP/jkv-http.log"
+            exit 1
+          fi
+
+          JKV_DOWNLOAD_BASE=http://127.0.0.1:8765 sh -s < ./install.sh
+          "$JKV_DIR/bin/jkv" version
+          JKV_DOWNLOAD_BASE=http://127.0.0.1:8765 sh -s < ./install.sh
+          test "$(grep -Fc '# jkv init' "$HOME/.bashrc")" -eq 1
+
+          cp "$JKV_DIR/bin/jkv" "$RUNNER_TEMP/jkv-before"
+          printf 'bad  %s\n' "$asset" > "$fixture/$asset.sha256"
+          if JKV_DOWNLOAD_BASE=http://127.0.0.1:8765 sh -s < ./install.sh; then
+            echo 'expected checksum failure' >&2
+            exit 1
+          fi
+          cmp "$RUNNER_TEMP/jkv-before" "$JKV_DIR/bin/jkv"
 
   native-windows:
     name: native windows/${{ matrix.goarch }}
@@ -109,7 +153,7 @@ jobs:
         run: |
           go build -trimpath -o jkv-ci.exe ./cmd/jkv
           & .\jkv-ci.exe version
-      - name: Run PowerShell installer
+      - name: Run PowerShell source installer
         shell: pwsh
         run: |
           $installDir = Join-Path $env:RUNNER_TEMP 'jkv-install'
@@ -117,4 +161,58 @@ jobs:
           & (Join-Path $installDir 'bin\jkv.exe') version
           if (-not (Select-String -Path $PROFILE -SimpleMatch '# jkv init' -Quiet)) {
             throw 'PowerShell profile missing jkv init hook'
+          }
+      - name: Run PowerShell binary installer
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP 'jkv-download'
+          $asset = 'jkv-windows-${{ matrix.goarch }}.exe'
+          $assetPath = Join-Path $fixture $asset
+          New-Item -ItemType Directory -Force -Path $fixture | Out-Null
+          go build -trimpath -o $assetPath ./cmd/jkv
+          if ($LASTEXITCODE -ne 0) { throw "go build failed with exit code $LASTEXITCODE" }
+          $hash = (Get-FileHash -Algorithm SHA256 $assetPath).Hash.ToLowerInvariant()
+          Set-Content -Encoding ascii "$assetPath.sha256" "$hash  $asset"
+
+          $server = Start-Process -FilePath python -ArgumentList @('-m', 'http.server', '8765', '--bind', '127.0.0.1') -WorkingDirectory $fixture -PassThru
+          try {
+            $ready = $false
+            foreach ($attempt in 1..10) {
+              try {
+                Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8765/$asset.sha256" | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) { throw 'local download server did not start' }
+
+            $installDir = Join-Path $env:RUNNER_TEMP 'jkv-binary-install'
+            $env:JKV_DIR = $installDir
+            $env:JKV_DOWNLOAD_BASE = 'http://127.0.0.1:8765'
+            Invoke-Expression (Get-Content .\install.ps1 -Raw)
+            & (Join-Path $installDir 'bin\jkv.exe') version
+            Invoke-Expression (Get-Content .\install.ps1 -Raw)
+            $markerCount = @(Select-String -Path $PROFILE -SimpleMatch '# jkv init').Count
+            if ($markerCount -ne 1) { throw "expected one profile marker, got $markerCount" }
+
+            $installed = Join-Path $installDir 'bin\jkv.exe'
+            $before = Join-Path $env:RUNNER_TEMP 'jkv-before.exe'
+            Copy-Item $installed $before
+            Set-Content -Encoding ascii "$assetPath.sha256" "bad  $asset"
+            $failed = $false
+            try {
+              Invoke-Expression (Get-Content .\install.ps1 -Raw)
+            } catch {
+              if ($_.Exception.Message -notmatch 'SHA-256') { throw }
+              $failed = $true
+            }
+            if (-not $failed) { throw 'expected checksum failure' }
+            if ((Get-FileHash $before).Hash -ne (Get-FileHash $installed).Hash) {
+              throw 'failed install replaced existing binary'
+            }
+          } finally {
+            Remove-Item Env:JKV_DOWNLOAD_BASE -ErrorAction SilentlyContinue
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }

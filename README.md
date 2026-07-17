@@ -17,33 +17,28 @@
 
 版本从镜像目录或官方元数据实时发现，不在客户端写死。Dragonwell 官方元数据偶发不可用时，客户端回退到内置的最近已知官方 OSS 坐标。
 
-## 安装
+## 快速开始（无需 Go）
 
-从源码目录一键构建安装（需要 Go）：
+Linux / macOS：
 
 ```sh
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/fishandsheep/jkv/main/install.sh | sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\install.ps1
-```
-
-发布 GitHub Release 后可远程安装：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/fishandsheep/jkv/main/install.sh | JKV_REPO=fishandsheep/jkv sh
-```
-
-```powershell
-$env:JKV_REPO='fishandsheep/jkv'
 irm https://raw.githubusercontent.com/fishandsheep/jkv/main/install.ps1 | iex
 ```
 
-安装器下载对应系统/架构二进制并校验 Release 附带的 SHA-256。Tag `v*` 会由 GitHub Actions 构建六个平台产物。
+安装器自动识别 Linux、macOS、Windows 及 amd64、arm64，从 GitHub Releases 下载原生二进制并校验 SHA-256。默认安装到 `~/.jkv`，无需 Go 或管理员权限。重新打开终端后验证：
+
+```sh
+jkv version
+jkv list
+```
+
+可用 `JKV_DIR` 修改安装目录，`JKV_REPO` 改用其他 GitHub fork，或用 `JKV_DOWNLOAD_BASE` 指向包含二进制及 `.sha256` 文件的镜像目录。Tag `v*` 会由 GitHub Actions 构建六个平台产物。
 
 不运行安装器时，手工加载环境：
 
@@ -166,4 +161,16 @@ jkv mirror status
 go test ./...
 go run ./cmd/jkv list java
 go build ./cmd/jkv
+```
+
+从源码目录安装（需要 Go）：
+
+```sh
+./install.sh
+```
+
+Windows PowerShell：
+
+```powershell
+.\install.ps1
 ```
