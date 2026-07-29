@@ -6,14 +6,15 @@ import (
 	"sort"
 	"strings"
 
-	"jkv/internal/catalog"
-	"jkv/internal/store"
+	"github.com/fishandsheep/jkv/internal/catalog"
+	"github.com/fishandsheep/jkv/internal/store"
 )
 
 var commandAliases = map[string]string{
 	"list": "list", "ls": "list",
 	"install": "install", "i": "install",
-	"use": "use", "u": "use",
+	"repair": "repair",
+	"use":    "use", "u": "use",
 	"default": "default", "d": "default",
 	"current": "current", "c": "current",
 	"uninstall": "uninstall", "rm": "uninstall",
@@ -22,14 +23,16 @@ var commandAliases = map[string]string{
 	"init": "init", "in": "init",
 	"mirror": "mirror", "m": "mirror",
 	"clean": "clean", "cl": "clean",
+	"doctor":  "doctor",
 	"version": "version", "v": "version", "--version": "version", "-v": "version",
 	"help": "help", "--help": "help", "-h": "help",
 }
 
 var topLevelCompletions = []string{
-	"list", "ls", "install", "i", "use", "u", "default", "d", "current", "c",
+	"list", "ls", "install", "i", "repair", "use", "u", "default", "d", "current", "c",
 	"uninstall", "rm", "home", "h", "env", "e", "init", "in", "mirror", "m",
 	"clean", "cl", "version", "v", "--version", "-v", "help", "--help", "-h",
+	"doctor",
 }
 
 func cmdComplete(ctx context.Context, s *store.Store, args []string) error {
@@ -64,8 +67,8 @@ func completions(ctx context.Context, s *store.Store, args []string) []string {
 			return matching(options, prefix)
 		}
 	case "install":
-		options := remainingOptions(completed, "--default")
-		positionals := omitOptions(completed, "--default")
+		options := remainingOptions(completed, "--default", "--require-checksum")
+		positionals := omitOptions(completed, "--default", "--require-checksum")
 		if len(positionals) == 0 {
 			return matching(append(candidates, options...), prefix)
 		}
@@ -75,7 +78,7 @@ func completions(ctx context.Context, s *store.Store, args []string) []string {
 		if len(positionals) == 2 {
 			return matching(options, prefix)
 		}
-	case "use", "default", "uninstall", "home":
+	case "use", "default", "uninstall", "home", "repair":
 		if len(args) == 2 {
 			return matching(candidates, prefix)
 		}
@@ -93,7 +96,7 @@ func completions(ctx context.Context, s *store.Store, args []string) []string {
 		}
 	case "init":
 		if len(args) == 2 {
-			return matching([]string{"bash", "zsh", "powershell", "pwsh"}, prefix)
+			return matching([]string{"bash", "zsh", "fish", "powershell", "pwsh"}, prefix)
 		}
 	case "mirror":
 		if len(args) == 2 {
@@ -104,7 +107,7 @@ func completions(ctx context.Context, s *store.Store, args []string) []string {
 		}
 	case "clean":
 		if len(args) == 2 {
-			return matching([]string{"downloads", "catalog"}, prefix)
+			return matching([]string{"downloads", "catalog", "--dry-run"}, prefix)
 		}
 		if len(args) == 3 && (args[1] == "downloads" || args[1] == "catalog") {
 			return matching(candidates, prefix)

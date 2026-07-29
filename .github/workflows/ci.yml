@@ -8,6 +8,58 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Go formatting
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Vet
+        run: go vet ./...
+      - name: GitHub Actions lint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Enforce package coverage floors
+        run: |
+          check_coverage() {
+            package="$1"
+            floor="$2"
+            profile="$(mktemp)"
+            go test -short -coverprofile="$profile" "$package"
+            actual="$(go tool cover -func="$profile" | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+            awk -v actual="$actual" -v floor="$floor" 'BEGIN {
+              if (actual + 0 < floor + 0) {
+                printf "coverage %.1f%% is below %.1f%%\n", actual, floor > "/dev/stderr"
+                exit 1
+              }
+            }'
+          }
+          check_coverage ./cmd/jkv 60
+          check_coverage ./internal/catalog 70
+          check_coverage ./internal/store 70
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.1
+          staticcheck ./...
+      - name: Govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+      - name: ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          shellcheck install.sh
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
+          Invoke-ScriptAnalyzer -Path ./install.ps1 -Recurse -EnableExit
+
   cross-build:
     name: cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-24.04
@@ -17,10 +69,10 @@ jobs:
         goos: [linux, darwin, windows]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version: 1.26.5
           cache: false
       - name: Cross compile
         env:
@@ -28,6 +80,16 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build -trimpath -o "jkv-${GOOS}-${GOARCH}" ./cmd/jkv
+      - name: Verify reproducible Linux amd64 build
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -o jkv-repro-1 ./cmd/jkv
+          go build -trimpath -o jkv-repro-2 ./cmd/jkv
+          cmp jkv-repro-1 jkv-repro-2
 
   native-unix:
     name: native ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -49,10 +111,10 @@ jobs:
             goarch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version: 1.26.5
           cache: false
       - name: Verify native runner
         run: |
@@ -133,10 +195,10 @@ jobs:
             goarch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          go-version: 1.26.5
           cache: false
       - name: Verify native runner
         shell: pwsh

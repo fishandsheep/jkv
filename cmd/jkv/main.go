@@ -2,17 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
 
-	"jkv/internal/catalog"
-	"jkv/internal/store"
+	"github.com/fishandsheep/jkv/internal/catalog"
+	"github.com/fishandsheep/jkv/internal/store"
 )
 
 var version = "dev"
@@ -20,11 +23,57 @@ var version = "dev"
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "错误:", err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
+	}
+}
+
+const (
+	exitUsage     = 2
+	exitNotFound  = 3
+	exitNetwork   = 4
+	exitIntegrity = 5
+	exitState     = 6
+)
+
+func exitCodeFor(err error) int {
+	message := err.Error()
+	switch {
+	case strings.HasPrefix(message, "用法:"),
+		strings.HasPrefix(message, "未知命令"),
+		strings.HasPrefix(message, "不支持选项"),
+		strings.HasPrefix(message, "不支持 candidate"):
+		return exitUsage
+	case strings.Contains(message, "SHA-256"),
+		strings.Contains(message, "校验和"),
+		strings.Contains(message, "压缩包包含"),
+		strings.Contains(message, "归档"):
+		return exitIntegrity
+	case strings.Contains(message, "HTTP "),
+		strings.Contains(message, "下载失败"),
+		strings.Contains(message, "镜像"),
+		strings.Contains(message, "网络"):
+		return exitNetwork
+	case strings.HasPrefix(message, "未安装"),
+		strings.Contains(message, "未找到版本"),
+		strings.Contains(message, "未设置默认版本"),
+		strings.Contains(message, "暂无稳定"):
+		return exitNotFound
+	case strings.HasPrefix(message, "已安装"),
+		strings.Contains(message, "已存在"),
+		strings.Contains(message, "拒绝覆盖"),
+		strings.Contains(message, "锁"):
+		return exitState
+	default:
+		return 1
 	}
 }
 
 func run(ctx context.Context, args []string) error {
+	options, args, err := parseGlobalOptions(args)
+	if err != nil {
+		return err
+	}
+	ctx = context.WithValue(ctx, cliOptionsKey{}, options)
 	if len(args) == 0 {
 		usage()
 		return nil
@@ -35,25 +84,32 @@ func run(ctx context.Context, args []string) error {
 		return cmdList(ctx, s, args[1:])
 	case "install", "i":
 		return cmdInstall(ctx, s, args[1:])
+	case "repair":
+		return cmdRepair(ctx, s, args[1:])
 	case "use", "u":
 		return cmdUse(s, args[1:])
 	case "default", "d":
 		return cmdDefault(s, args[1:])
 	case "current", "c":
-		return cmdCurrent(s, args[1:])
+		return cmdCurrent(ctx, s, args[1:])
 	case "uninstall", "rm":
 		return cmdUninstall(s, args[1:])
 	case "home", "h":
-		return cmdHome(s, args[1:])
+		return cmdHome(ctx, s, args[1:])
 	case "env", "e":
 		return cmdEnv(s, args[1:])
 	case "init", "in":
 		return cmdInit(args[1:])
 	case "mirror", "m":
-		return cmdMirror(args[1:])
+		return cmdMirror(ctx, args[1:])
 	case "clean", "cl":
-		return cmdClean(s, args[1:])
+		return cmdClean(ctx, s, args[1:])
+	case "doctor":
+		return cmdDoctor(ctx, s, args[1:])
 	case "version", "v", "--version", "-v":
+		if options.JSON {
+			return writeJSON(map[string]string{"name": "jkv", "version": version})
+		}
 		fmt.Println("jkv", version)
 		return nil
 	case "help", "-h", "--help":
@@ -66,21 +122,54 @@ func run(ctx context.Context, args []string) error {
 	}
 }
 
+type cliOptionsKey struct{}
+
+type cliOptions struct {
+	JSON    bool
+	Quiet   bool
+	Verbose bool
+}
+
+func parseGlobalOptions(args []string) (cliOptions, []string, error) {
+	var options cliOptions
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			options.JSON = true
+		case "--quiet":
+			options.Quiet = true
+		case "--verbose":
+			options.Verbose = true
+		default:
+			out = append(out, arg)
+		}
+	}
+	return options, out, nil
+}
+
+func optionsFromContext(ctx context.Context) cliOptions {
+	options, _ := ctx.Value(cliOptionsKey{}).(cliOptions)
+	return options
+}
+
 func usage() {
 	fmt.Print(`jkv - 中国网络友好、跨平台 JVM 工具版本管理器
 
 用法:
   jkv list|ls [candidate] [--refresh]  列出工具或在线版本
   jkv install|i <candidate> [version]  安装版本；支持 21-tem 等别名
+  jkv repair <candidate> <version>     原子修复已安装版本
   jkv use|u <candidate> <version>      当前终端切换（需 shell hook）
   jkv default|d <candidate> <version>  设置默认版本
   jkv current|c [candidate]            显示当前生效版本
   jkv uninstall|rm <candidate> <ver>   卸载版本
   jkv home|h <candidate> [version]     输出安装目录
   jkv env|e [init|apply|clear]          项目 .jkvrc 环境
-  jkv init|in <bash|zsh|powershell>     输出 shell hook 和补全
+  jkv init|in <bash|zsh|fish|powershell> 输出 shell hook 和补全
   jkv mirror|m <maven|gradle|status>    配置国内依赖镜像
   jkv clean|cl [downloads|catalog]      清理本地缓存
+  jkv doctor                            检查本机配置与运行环境
   jkv version|v                         显示版本
   jkv help                              显示帮助
 
@@ -106,6 +195,9 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 		}
 	}
 	if len(positional) == 0 {
+		if optionsFromContext(ctx).JSON {
+			return writeJSON(catalog.Candidates)
+		}
 		fmt.Printf("%-12s %-36s %-22s %s\n", "CANDIDATE", "说明", "国内源", "平台")
 		for _, c := range catalog.Candidates {
 			fmt.Printf("%-12s %-36s %-22s %s\n", c.Name, c.Description, c.Source, c.Platforms)
@@ -131,6 +223,24 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 	}
 	if len(releases) == 0 {
 		return fmt.Errorf("当前平台 %s/%s 暂无稳定国内源", runtime.GOOS, runtime.GOARCH)
+	}
+	if optionsFromContext(ctx).JSON {
+		type listedRelease struct {
+			catalog.Release
+			Installed bool `json:"installed"`
+			Default   bool `json:"default"`
+			Current   bool `json:"current"`
+		}
+		out := make([]listedRelease, 0, len(releases))
+		for _, release := range releases {
+			out = append(out, listedRelease{
+				Release:   release,
+				Installed: installedSet[release.Version],
+				Default:   defaults[candidate] == release.Version,
+				Current:   os.Getenv(currentVar(candidate)) == release.Version,
+			})
+		}
+		return writeJSON(out)
 	}
 	groups := releaseGroups(candidate, releases)
 	for groupIndex, group := range groups {
@@ -204,6 +314,14 @@ func loadReleases(ctx context.Context, s *store.Store, candidate string, refresh
 	now := time.Now()
 	cached, cacheErr := s.LoadCatalog(platform, candidate)
 	hasCache := cacheErr == nil && len(cached.Releases) > 0
+	options := optionsFromContext(ctx)
+	if options.Verbose && !options.Quiet {
+		if hasCache {
+			fmt.Fprintf(os.Stderr, "catalog 缓存: %d 个版本，年龄 %s\n", len(cached.Releases), now.Sub(cached.FetchedAt).Round(time.Second))
+		} else {
+			fmt.Fprintf(os.Stderr, "catalog 缓存不可用: %v\n", cacheErr)
+		}
+	}
 	client := catalog.NewClient()
 	refreshFailed := false
 	if refresh || !hasCache || now.Sub(cached.FetchedAt) >= catalogCacheTTL {
@@ -262,10 +380,15 @@ func hostOf(raw string) string {
 
 func cmdInstall(ctx context.Context, s *store.Store, args []string) error {
 	setDefault := false
+	requireChecksum := envEnabled("JKV_REQUIRE_CHECKSUM")
 	var pos []string
 	for _, arg := range args {
 		if arg == "--default" {
 			setDefault = true
+			continue
+		}
+		if arg == "--require-checksum" {
+			requireChecksum = true
 			continue
 		}
 		if strings.HasPrefix(arg, "--") {
@@ -301,8 +424,18 @@ func cmdInstall(ctx context.Context, s *store.Store, args []string) error {
 			return err
 		}
 	}
-	fmt.Fprintf(os.Stderr, "安装 %s %s，来源 %s\n", candidate, r.Version, hostOf(r.URL))
-	if err := s.Install(ctx, r, os.Stderr); err != nil {
+	options := optionsFromContext(ctx)
+	if r.ChecksumURL == "" {
+		fmt.Fprintln(os.Stderr, "警告: 此镜像未提供同源 SHA-256；下载仅由 HTTPS 保护。")
+	}
+	if !options.Quiet {
+		fmt.Fprintf(os.Stderr, "安装 %s %s，来源 %s\n", candidate, r.Version, hostOf(r.URL))
+	}
+	var progress io.Writer = os.Stderr
+	if options.Quiet {
+		progress = nil
+	}
+	if err := s.InstallWithOptions(ctx, r, progress, store.InstallOptions{RequireChecksum: requireChecksum}); err != nil {
 		return err
 	}
 	defaults, _ := s.Defaults()
@@ -314,9 +447,41 @@ func cmdInstall(ctx context.Context, s *store.Store, args []string) error {
 	} else {
 		fmt.Printf("已安装: %s %s\n", candidate, r.Version)
 	}
-	if r.ChecksumURL == "" {
-		fmt.Fprintln(os.Stderr, "提示: 此镜像未提供同源 SHA-256；下载由 HTTPS 保护。")
+	return nil
+}
+
+func envEnabled(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
+}
+
+func cmdRepair(ctx context.Context, s *store.Store, args []string) error {
+	if len(args) != 2 {
+		return errors.New("用法: jkv repair <candidate> <version>")
+	}
+	version, err := installedMatch(s, args[0], args[1])
+	if err != nil {
+		return err
+	}
+	release, err := s.InstalledRelease(args[0], version)
+	if err != nil {
+		return err
+	}
+	var progress io.Writer = os.Stderr
+	if optionsFromContext(ctx).Quiet {
+		progress = nil
+	}
+	if err := s.InstallWithOptions(ctx, release, progress, store.InstallOptions{
+		Repair:          true,
+		RequireChecksum: envEnabled("JKV_REQUIRE_CHECKSUM"),
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("已修复: %s %s\n", args[0], version)
 	return nil
 }
 
@@ -441,7 +606,7 @@ func installedMatch(s *store.Store, candidate, want string) (string, error) {
 	return "", fmt.Errorf("未安装 %s %s", candidate, want)
 }
 
-func cmdCurrent(s *store.Store, args []string) error {
+func cmdCurrent(ctx context.Context, s *store.Store, args []string) error {
 	d, err := s.Defaults()
 	if err != nil {
 		return err
@@ -454,6 +619,9 @@ func cmdCurrent(s *store.Store, args []string) error {
 		if v == "" {
 			return fmt.Errorf("%s 未设置默认版本", args[0])
 		}
+		if optionsFromContext(ctx).JSON {
+			return writeJSON(map[string]string{"candidate": args[0], "version": v})
+		}
 		fmt.Println(v)
 		return nil
 	}
@@ -464,13 +632,25 @@ func cmdCurrent(s *store.Store, args []string) error {
 	}
 	keys := sortedKeys(d)
 	if len(keys) == 0 {
+		if optionsFromContext(ctx).JSON {
+			return writeJSON(map[string]string{})
+		}
 		fmt.Println("尚未设置默认版本")
 		return nil
+	}
+	if optionsFromContext(ctx).JSON {
+		return writeJSON(d)
 	}
 	for _, k := range keys {
 		fmt.Printf("%-12s %s\n", k, d[k])
 	}
 	return nil
+}
+
+func writeJSON(value any) error {
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(value)
 }
 
 func cmdUninstall(s *store.Store, args []string) error {
@@ -488,7 +668,7 @@ func cmdUninstall(s *store.Store, args []string) error {
 	return nil
 }
 
-func cmdHome(s *store.Store, args []string) error {
+func cmdHome(ctx context.Context, s *store.Store, args []string) error {
 	if len(args) < 1 || len(args) > 2 {
 		return errors.New("用法: jkv home <candidate> [version]")
 	}
@@ -508,9 +688,52 @@ func cmdHome(s *store.Store, args []string) error {
 	}
 	h, err := s.Home(args[0], v)
 	if err == nil {
+		if optionsFromContext(ctx).JSON {
+			return writeJSON(map[string]string{"candidate": args[0], "version": v, "home": h})
+		}
 		fmt.Println(h)
 	}
 	return err
+}
+
+type doctorResult struct {
+	Root       string `json:"root"`
+	OS         string `json:"os"`
+	Arch       string `json:"arch"`
+	Writable   bool   `json:"writable"`
+	HTTPSProxy bool   `json:"https_proxy"`
+	HTTPProxy  bool   `json:"http_proxy"`
+	NoProxy    bool   `json:"no_proxy"`
+}
+
+func cmdDoctor(ctx context.Context, s *store.Store, args []string) error {
+	if len(args) != 0 {
+		return errors.New("用法: jkv doctor")
+	}
+	result := doctorResult{
+		Root:       s.Root,
+		OS:         runtime.GOOS,
+		Arch:       runtime.GOARCH,
+		HTTPSProxy: os.Getenv("HTTPS_PROXY") != "" || os.Getenv("https_proxy") != "",
+		HTTPProxy:  os.Getenv("HTTP_PROXY") != "" || os.Getenv("http_proxy") != "",
+		NoProxy:    os.Getenv("NO_PROXY") != "" || os.Getenv("no_proxy") != "",
+	}
+	if err := os.MkdirAll(s.Root, 0o755); err == nil {
+		if f, createErr := os.CreateTemp(s.Root, ".jkv-doctor-"); createErr == nil {
+			result.Writable = true
+			name := f.Name()
+			_ = f.Close()
+			_ = os.Remove(name)
+		}
+	}
+	if optionsFromContext(ctx).JSON {
+		return writeJSON(result)
+	}
+	fmt.Printf("jkv doctor\n目录: %s\n平台: %s/%s\n可写: %t\n", result.Root, result.OS, result.Arch, result.Writable)
+	if !result.Writable {
+		return fmt.Errorf("JKV_DIR 不可写: %s", result.Root)
+	}
+	return nil
 }
 
 func cmdEnv(s *store.Store, args []string) error {
@@ -573,12 +796,18 @@ func readEnvFile(path string) (map[string]string, error) {
 			continue
 		}
 		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 || !catalog.IsCandidate(strings.TrimSpace(parts[0])) {
+		if len(parts) != 2 || !catalog.IsCandidate(strings.TrimSpace(parts[0])) || !validVersionValue(strings.TrimSpace(parts[1])) {
 			return nil, fmt.Errorf("%s:%d 格式错误", path, n+1)
 		}
 		m[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 	}
 	return m, nil
+}
+
+var versionValueRE = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]*$`)
+
+func validVersionValue(value string) bool {
+	return versionValueRE.MatchString(value) && !strings.ContainsAny(value, `/\`)
 }
 
 var homeVars = map[string]string{
@@ -603,6 +832,10 @@ func printEnv(s *store.Store, versions map[string]string, shell string, includeB
 			fmt.Printf("$env:%s = %s\n", name, psQuote(home))
 			fmt.Printf("$env:%s = %s\n", currentVar(candidate), psQuote(version))
 			fmt.Printf("$env:Path = %s + [IO.Path]::PathSeparator + $env:Path\n", psQuote(filepath.Join(home, "bin")))
+		case "fish":
+			fmt.Printf("set -gx %s %s\n", name, fishQuote(home))
+			fmt.Printf("set -gx %s %s\n", currentVar(candidate), fishQuote(version))
+			fmt.Printf("fish_add_path --prepend %s\n", fishQuote(filepath.Join(home, "bin")))
 		default:
 			return fmt.Errorf("不支持 shell %q", shell)
 		}
@@ -611,6 +844,8 @@ func printEnv(s *store.Store, versions map[string]string, shell string, includeB
 		bin := filepath.Join(s.Root, "bin")
 		if shell == "powershell" || shell == "pwsh" {
 			fmt.Printf("$env:JKV_DIR = %s\n$env:Path = %s + [IO.Path]::PathSeparator + $env:Path\n", psQuote(s.Root), psQuote(bin))
+		} else if shell == "fish" {
+			fmt.Printf("set -gx JKV_DIR %s\nfish_add_path --prepend %s\n", fishQuote(s.Root), fishQuote(bin))
 		} else {
 			fmt.Printf("export JKV_DIR=%s\nexport PATH=%s:$PATH\n", shQuote(s.Root), shQuote(bin))
 		}
@@ -624,7 +859,7 @@ func currentVar(candidate string) string {
 
 func cmdInit(args []string) error {
 	if len(args) != 1 {
-		return errors.New("用法: jkv init <bash|zsh|powershell>")
+		return errors.New("用法: jkv init <bash|zsh|fish|powershell>")
 	}
 	switch args[0] {
 	case "bash":
@@ -665,6 +900,29 @@ fi
 compdef _jkv_complete jkv
 eval "$(command jkv env --shell zsh)"
 `)
+	case "fish":
+		fmt.Print(`function jkv
+  switch $argv[1]
+    case use u default d
+      command jkv $argv --shell fish | source
+    case env e
+      if test "$argv[2]" = init
+        command jkv $argv
+      else
+        command jkv $argv --shell fish | source
+      end
+    case '*'
+      command jkv $argv
+  end
+end
+function __jkv_complete
+  set -l words (commandline -opc)
+  set -e words[1]
+  command jkv __complete $words (commandline -ct)
+end
+complete --command jkv --no-files --arguments '(__jkv_complete)'
+command jkv env --shell fish | source
+`)
 	case "powershell", "pwsh":
 		fmt.Printf(`function jkv {
   if ($args[0] -in @('use','u','default','d') -or ($args[0] -in @('env','e') -and $args[1] -ne 'init')) {
@@ -688,7 +946,7 @@ Invoke-Expression ((& (Join-Path $env:JKV_DIR 'bin/jkv.exe') env --shell powersh
 	return nil
 }
 
-func cmdMirror(args []string) error {
+func cmdMirror(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("用法: jkv mirror <maven|gradle|status> [--apply]")
 	}
@@ -745,11 +1003,22 @@ allprojects {
 		}
 		fmt.Println("已启用 Gradle 阿里云依赖镜像:", path)
 	case "status":
-		for _, p := range []string{filepath.Join(home, ".m2", "settings-jkv.xml"), filepath.Join(home, ".gradle", "init.d", "jkv-mirrors.gradle")} {
-			if _, err := os.Stat(p); err == nil {
-				fmt.Println("存在", p)
+		status := []map[string]any{
+			{"tool": "maven", "path": filepath.Join(home, ".m2", "settings-jkv.xml")},
+			{"tool": "gradle", "path": filepath.Join(home, ".gradle", "init.d", "jkv-mirrors.gradle")},
+		}
+		for _, item := range status {
+			_, err := os.Stat(item["path"].(string))
+			item["configured"] = err == nil
+		}
+		if optionsFromContext(ctx).JSON {
+			return writeJSON(status)
+		}
+		for _, item := range status {
+			if item["configured"].(bool) {
+				fmt.Println("存在", item["path"])
 			} else {
-				fmt.Println("未配置", p)
+				fmt.Println("未配置", item["path"])
 			}
 		}
 	default:
@@ -758,9 +1027,19 @@ allprojects {
 	return nil
 }
 
-func cmdClean(s *store.Store, args []string) error {
+func cmdClean(ctx context.Context, s *store.Store, args []string) error {
+	dryRun := false
+	var positional []string
+	for _, arg := range args {
+		if arg == "--dry-run" {
+			dryRun = true
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+	args = positional
 	if len(args) > 3 {
-		return errors.New("用法: jkv clean [downloads [candidate [version]]|catalog [candidate]]")
+		return errors.New("用法: jkv clean [downloads [candidate [version]]|catalog [candidate]] [--dry-run]")
 	}
 	kind, candidate, version := "", "", ""
 	if len(args) > 0 {
@@ -781,9 +1060,22 @@ func cmdClean(s *store.Store, args []string) error {
 		}
 		version = args[2]
 	}
-	result, err := s.CleanCache(kind, candidate, version)
+	var result store.CleanResult
+	var err error
+	if dryRun {
+		result, err = s.InspectCache(kind, candidate, version)
+	} else {
+		result, err = s.CleanCache(kind, candidate, version)
+	}
 	if err != nil {
 		return err
+	}
+	if optionsFromContext(ctx).JSON {
+		return writeJSON(map[string]any{"dry_run": dryRun, "files": result.Files, "bytes": result.Bytes})
+	}
+	if dryRun {
+		fmt.Printf("将清理 %d 个文件，释放 %s\n", result.Files, formatBytes(result.Bytes))
+		return nil
 	}
 	fmt.Printf("已清理 %d 个文件，释放 %s\n", result.Files, formatBytes(result.Bytes))
 	return nil
@@ -837,8 +1129,8 @@ func guessedShell() string {
 		return "powershell"
 	}
 	s := filepath.Base(os.Getenv("SHELL"))
-	if s == "zsh" {
-		return "zsh"
+	if s == "zsh" || s == "fish" {
+		return s
 	}
 	return "bash"
 }
@@ -847,9 +1139,17 @@ func shellInitHint(shell string) string {
 	if shell == "powershell" || shell == "pwsh" {
 		return `Invoke-Expression ((jkv init powershell) -join [Environment]::NewLine)`
 	}
+	if shell == "fish" {
+		return "jkv init fish | source"
+	}
 	return fmt.Sprintf(`eval "$(jkv init %s)"`, shell)
 }
 
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+func fishQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return "'" + strings.ReplaceAll(s, "'", `\'`) + "'"
+}

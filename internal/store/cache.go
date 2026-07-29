@@ -1,27 +1,31 @@
 package store
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"jkv/internal/catalog"
+	"github.com/fishandsheep/jkv/internal/catalog"
 )
 
 type CatalogCache struct {
-	FetchedAt time.Time         `json:"fetched_at"`
-	CheckedAt time.Time         `json:"checked_at,omitempty"`
-	Releases  []catalog.Release `json:"releases"`
+	SchemaVersion int               `json:"schema_version"`
+	FetchedAt     time.Time         `json:"fetched_at"`
+	CheckedAt     time.Time         `json:"checked_at,omitempty"`
+	Releases      []catalog.Release `json:"releases"`
 }
 
 type archiveMetadata struct {
-	Release catalog.Release `json:"release"`
-	SHA256  string          `json:"sha256"`
+	SchemaVersion int             `json:"schema_version"`
+	Release       catalog.Release `json:"release"`
+	SHA256        string          `json:"sha256"`
 }
 
 type CleanResult struct {
@@ -44,10 +48,16 @@ func (s *Store) LoadCatalog(p catalog.Platform, candidate string) (CatalogCache,
 	if err := json.Unmarshal(b, &cached); err != nil {
 		return CatalogCache{}, err
 	}
+	if cached.SchemaVersion > stateSchemaVersion {
+		return CatalogCache{}, fmt.Errorf("不支持 catalog schema %d", cached.SchemaVersion)
+	}
 	return cached, nil
 }
 
 func (s *Store) SaveCatalog(p catalog.Platform, candidate string, cached CatalogCache) error {
+	if cached.SchemaVersion == 0 {
+		cached.SchemaVersion = stateSchemaVersion
+	}
 	b, err := json.MarshalIndent(cached, "", "  ")
 	if err != nil {
 		return err
@@ -87,7 +97,8 @@ func (s *Store) CachedRelease(candidate, version string) (catalog.Release, bool)
 		return catalog.Release{}, false
 	}
 	var metadata archiveMetadata
-	if json.Unmarshal(b, &metadata) != nil || metadata.Release.Candidate != candidate || metadata.Release.Version != version || metadata.Release.URL == "" {
+	if json.Unmarshal(b, &metadata) != nil || metadata.SchemaVersion > stateSchemaVersion ||
+		metadata.Release.Candidate != candidate || metadata.Release.Version != version || metadata.Release.URL == "" {
 		return catalog.Release{}, false
 	}
 	return metadata.Release, true
@@ -122,7 +133,8 @@ func (s *Store) validCachedArchive(r catalog.Release) (string, bool) {
 		return "", false
 	}
 	var metadata archiveMetadata
-	if json.Unmarshal(b, &metadata) != nil || metadata.Release.URL != r.URL || metadata.SHA256 == "" {
+	if json.Unmarshal(b, &metadata) != nil || metadata.SchemaVersion > stateSchemaVersion ||
+		metadata.Release.URL != r.URL || metadata.SHA256 == "" {
 		return "", false
 	}
 	sum, err := fileSHA256(archive)
@@ -134,7 +146,7 @@ func (s *Store) saveArchiveMetadata(r catalog.Release, sum string) error {
 	if !ok {
 		return os.ErrInvalid
 	}
-	b, err := json.MarshalIndent(archiveMetadata{Release: r, SHA256: sum}, "", "  ")
+	b, err := json.MarshalIndent(archiveMetadata{SchemaVersion: stateSchemaVersion, Release: r, SHA256: sum}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -155,58 +167,92 @@ func fileSHA256(path string) (string, error) {
 }
 
 func (s *Store) CleanCache(kind, candidate, version string) (CleanResult, error) {
+	lock, err := s.acquireLock(context.Background(), "cache")
+	if err != nil {
+		return CleanResult{}, err
+	}
+	defer lock.release()
+	paths, err := s.cachePaths(kind, candidate, version)
+	if err != nil {
+		return CleanResult{}, err
+	}
+	var total CleanResult
+	for _, path := range paths {
+		result, err := removeMeasured(path)
+		if err != nil {
+			return total, err
+		}
+		total.Files += result.Files
+		total.Bytes += result.Bytes
+	}
+	return total, nil
+}
+
+func (s *Store) InspectCache(kind, candidate, version string) (CleanResult, error) {
+	paths, err := s.cachePaths(kind, candidate, version)
+	if err != nil {
+		return CleanResult{}, err
+	}
+	var total CleanResult
+	for _, path := range paths {
+		result, err := measurePath(path)
+		if err != nil {
+			return total, err
+		}
+		total.Files += result.Files
+		total.Bytes += result.Bytes
+	}
+	return total, nil
+}
+
+func (s *Store) cachePaths(kind, candidate, version string) ([]string, error) {
 	if kind == "" {
-		return removeMeasured(s.cacheRoot())
+		return []string{s.cacheRoot()}, nil
 	}
 	if kind == "downloads" {
 		path := filepath.Join(s.cacheRoot(), "downloads")
 		if candidate != "" {
 			if !validSegment(candidate) {
-				return CleanResult{}, os.ErrInvalid
+				return nil, os.ErrInvalid
 			}
 			path = filepath.Join(path, candidate)
 		}
 		if version != "" {
 			if candidate == "" || !validSegment(version) {
-				return CleanResult{}, os.ErrInvalid
+				return nil, os.ErrInvalid
 			}
 			path = filepath.Join(path, version)
 		}
-		return removeMeasured(path)
+		return []string{path}, nil
 	}
 	if kind == "catalog" {
 		root := filepath.Join(s.cacheRoot(), "catalog")
 		if candidate == "" {
-			return removeMeasured(root)
+			return []string{root}, nil
 		}
 		if !validSegment(candidate) {
-			return CleanResult{}, os.ErrInvalid
+			return nil, os.ErrInvalid
 		}
 		entries, err := os.ReadDir(root)
 		if os.IsNotExist(err) {
-			return CleanResult{}, nil
+			return nil, nil
 		}
 		if err != nil {
-			return CleanResult{}, err
+			return nil, err
 		}
-		var total CleanResult
+		var paths []string
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
 			}
-			result, err := removeMeasured(filepath.Join(root, entry.Name(), candidate+".json"))
-			if err != nil {
-				return total, err
-			}
-			total.Files += result.Files
-			total.Bytes += result.Bytes
+			paths = append(paths, filepath.Join(root, entry.Name(), candidate+".json"))
 		}
-		return total, nil
+		return paths, nil
 	}
-	return CleanResult{}, os.ErrInvalid
+	return nil, os.ErrInvalid
 }
 
-func removeMeasured(path string) (CleanResult, error) {
+func measurePath(path string) (CleanResult, error) {
 	var result CleanResult
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
 		if os.IsNotExist(err) {
@@ -224,6 +270,14 @@ func removeMeasured(path string) (CleanResult, error) {
 	if os.IsNotExist(err) {
 		return CleanResult{}, nil
 	}
+	if err != nil {
+		return CleanResult{}, err
+	}
+	return result, nil
+}
+
+func removeMeasured(path string) (CleanResult, error) {
+	result, err := measurePath(path)
 	if err != nil {
 		return CleanResult{}, err
 	}
