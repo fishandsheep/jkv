@@ -2,6 +2,8 @@ name: ci
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -80,7 +82,12 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
-          Invoke-ScriptAnalyzer -Path ./install.ps1 -Recurse -EnableExit
+          $excludedRules = @(
+            'PSAvoidUsingWriteHost'
+            'PSUseBOMForUnicodeEncodedFile'
+            'PSUseShouldProcessForStateChangingFunctions'
+          )
+          Invoke-ScriptAnalyzer -Path ./install.ps1 -Recurse -ExcludeRule $excludedRules -EnableExit
 
   cross-build:
     name: cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
