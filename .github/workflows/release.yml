@@ -117,6 +117,8 @@ jobs:
           BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
         run: |
           cp "$BUNDLE_PATH" "dist/${GITHUB_REF_NAME}.provenance.sigstore.json"
+          chmod +x dist/jkv-linux-amd64
+          test -x dist/jkv-linux-amd64
           test "$(find dist -maxdepth 1 -type f -name 'jkv-*.spdx.json' | wc -l)" -eq 6
           test "$(find dist -maxdepth 1 -type f -name 'jkv-*.sha256' | wc -l)" -eq 6
           (cd dist && for sum in *.sha256; do sha256sum --check "$sum"; done)
