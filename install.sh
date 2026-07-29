@@ -29,15 +29,15 @@ if [ "$action" = install ]; then
   mkdir -p "$(dirname "$JKV_DIR")"
 fi
 if [ -d "$JKV_DIR" ]; then
-  JKV_DIR=$(CDPATH= cd "$JKV_DIR" && pwd -P)
+  JKV_DIR=$(CDPATH='' cd "$JKV_DIR" && pwd -P)
 else
-  parent=$(CDPATH= cd "$(dirname "$JKV_DIR")" 2>/dev/null && pwd -P) || {
+  parent=$(CDPATH='' cd "$(dirname "$JKV_DIR")" 2>/dev/null && pwd -P) || {
     echo "安装目录的父目录不存在: $JKV_DIR" >&2
     exit 2
   }
   JKV_DIR="$parent/$(basename "$JKV_DIR")"
 fi
-home_canonical=$(CDPATH= cd "$HOME" && pwd -P)
+home_canonical=$(CDPATH='' cd "$HOME" && pwd -P)
 BIN_DIR="$JKV_DIR/bin"
 
 if [ "${JKV_MODIFY_PROFILE:-1}" = 0 ]; then
@@ -114,7 +114,7 @@ mkdir -p "$BIN_DIR"
 
 source_root=
 case "$0" in
-  */install.sh|install.sh) source_root=$(CDPATH= cd "$(dirname "$0")" && pwd) ;;
+  */install.sh|install.sh) source_root=$(CDPATH='' cd "$(dirname "$0")" && pwd) ;;
 esac
 
 if [ -z "${JKV_DOWNLOAD_BASE:-}" ] && [ -n "$source_root" ] &&
@@ -198,12 +198,15 @@ if [ "$modify_profile" = true ]; then
     if [ "$shell_name" = fish ]; then
       escaped_dir=$(printf '%s' "$JKV_DIR" | sed "s/'/\\\\'/g")
       printf "set -gx JKV_DIR '%s'\n" "$escaped_dir"
+      # shellcheck disable=SC2016
       printf 'fish_add_path --prepend "$JKV_DIR/bin"\n'
       printf 'jkv init fish | source\n'
     else
       escaped_dir=$(printf '%s' "$JKV_DIR" | sed "s/'/'\\\\''/g")
       printf "export JKV_DIR='%s'\n" "$escaped_dir"
+      # shellcheck disable=SC2016
       printf 'export PATH="$JKV_DIR/bin:$PATH"\n'
+      # shellcheck disable=SC2016
       printf 'eval "$(jkv init %s)"\n' "$shell_name"
     fi
     printf '%s\n' "$MANAGED_END"
