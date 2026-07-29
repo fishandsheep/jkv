@@ -55,6 +55,11 @@ func (s *Store) LoadCatalog(p catalog.Platform, candidate string) (CatalogCache,
 }
 
 func (s *Store) SaveCatalog(p catalog.Platform, candidate string, cached CatalogCache) error {
+	lock, err := s.acquireLock(context.Background(), "cache")
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 	if cached.SchemaVersion == 0 {
 		cached.SchemaVersion = stateSchemaVersion
 	}
@@ -203,6 +208,268 @@ func (s *Store) InspectCache(kind, candidate, version string) (CleanResult, erro
 		total.Bytes += result.Bytes
 	}
 	return total, nil
+}
+
+func (s *Store) CleanCacheOlderThan(kind, candidate, version string, age time.Duration) (CleanResult, error) {
+	lock, err := s.acquireLock(context.Background(), "cache")
+	if err != nil {
+		return CleanResult{}, err
+	}
+	defer lock.release()
+	paths, err := s.olderCachePaths(kind, candidate, version, age)
+	if err != nil {
+		return CleanResult{}, err
+	}
+	var total CleanResult
+	for _, path := range paths {
+		result, err := removeMeasured(path)
+		if err != nil {
+			return total, err
+		}
+		total.Files += result.Files
+		total.Bytes += result.Bytes
+	}
+	return total, nil
+}
+
+func (s *Store) InspectCacheOlderThan(kind, candidate, version string, age time.Duration) (CleanResult, error) {
+	paths, err := s.olderCachePaths(kind, candidate, version, age)
+	if err != nil {
+		return CleanResult{}, err
+	}
+	var total CleanResult
+	for _, path := range paths {
+		result, err := measurePath(path)
+		if err != nil {
+			return total, err
+		}
+		total.Files += result.Files
+		total.Bytes += result.Bytes
+	}
+	return total, nil
+}
+
+func (s *Store) CleanPartialsOlderThan(candidate, version string, age time.Duration) (CleanResult, error) {
+	paths, err := s.olderPartialPaths(candidate, version, age)
+	if err != nil {
+		return CleanResult{}, err
+	}
+	var total CleanResult
+	for _, path := range paths {
+		candidateName := filepath.Base(filepath.Dir(path))
+		versionName := filepath.Base(path)
+		lock, err := s.acquireLock(context.Background(), "install-"+candidateName+"-"+versionName)
+		if err != nil {
+			return total, err
+		}
+		latest, exists, checkErr := newestModTime(path)
+		if checkErr == nil && exists && latest.Before(time.Now().Add(-age)) {
+			var result CleanResult
+			result, checkErr = removeMeasured(path)
+			total.Files += result.Files
+			total.Bytes += result.Bytes
+		}
+		lock.release()
+		if checkErr != nil {
+			return total, checkErr
+		}
+	}
+	return total, nil
+}
+
+func (s *Store) InspectPartialsOlderThan(candidate, version string, age time.Duration) (CleanResult, error) {
+	paths, err := s.olderPartialPaths(candidate, version, age)
+	if err != nil {
+		return CleanResult{}, err
+	}
+	var total CleanResult
+	for _, path := range paths {
+		result, err := measurePath(path)
+		if err != nil {
+			return total, err
+		}
+		total.Files += result.Files
+		total.Bytes += result.Bytes
+	}
+	return total, nil
+}
+
+func (s *Store) olderPartialPaths(candidate, version string, age time.Duration) ([]string, error) {
+	if age <= 0 || candidate != "" && !validSegment(candidate) ||
+		version != "" && (candidate == "" || !validSegment(version)) {
+		return nil, os.ErrInvalid
+	}
+	root := filepath.Join(s.Root, "partials", "downloads")
+	var paths []string
+	if version != "" {
+		paths = append(paths, filepath.Join(root, candidate, version))
+	} else {
+		candidates, err := os.ReadDir(root)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, candidateEntry := range candidates {
+			if !candidateEntry.IsDir() || candidate != "" && candidateEntry.Name() != candidate {
+				continue
+			}
+			versions, readErr := os.ReadDir(filepath.Join(root, candidateEntry.Name()))
+			if readErr != nil {
+				return nil, readErr
+			}
+			for _, versionEntry := range versions {
+				if versionEntry.IsDir() {
+					paths = append(paths, filepath.Join(root, candidateEntry.Name(), versionEntry.Name()))
+				}
+			}
+		}
+	}
+	cutoff := time.Now().Add(-age)
+	var old []string
+	for _, path := range paths {
+		latest, exists, err := newestModTime(path)
+		if err != nil {
+			return nil, err
+		}
+		if exists && latest.Before(cutoff) {
+			old = append(old, path)
+		}
+	}
+	return old, nil
+}
+
+func (s *Store) olderCachePaths(kind, candidate, version string, age time.Duration) ([]string, error) {
+	if age <= 0 {
+		return nil, os.ErrInvalid
+	}
+	if kind == "" {
+		downloads, err := s.olderCachePaths("downloads", candidate, version, age)
+		if err != nil {
+			return nil, err
+		}
+		catalogs, err := s.olderCachePaths("catalog", candidate, "", age)
+		return append(downloads, catalogs...), err
+	}
+	if kind != "downloads" && kind != "catalog" {
+		return nil, os.ErrInvalid
+	}
+	if candidate != "" && !validSegment(candidate) {
+		return nil, os.ErrInvalid
+	}
+	if version != "" && (kind != "downloads" || candidate == "" || !validSegment(version)) {
+		return nil, os.ErrInvalid
+	}
+	var candidates []string
+	if kind == "downloads" {
+		root := filepath.Join(s.cacheRoot(), "downloads")
+		if candidate != "" {
+			root = filepath.Join(root, candidate)
+		}
+		if version != "" {
+			candidates = append(candidates, filepath.Join(root, version))
+		} else {
+			if candidate == "" {
+				entries, err := os.ReadDir(root)
+				if os.IsNotExist(err) {
+					return nil, nil
+				}
+				if err != nil {
+					return nil, err
+				}
+				for _, candidateEntry := range entries {
+					if !candidateEntry.IsDir() {
+						continue
+					}
+					versionEntries, readErr := os.ReadDir(filepath.Join(root, candidateEntry.Name()))
+					if readErr != nil {
+						return nil, readErr
+					}
+					for _, versionEntry := range versionEntries {
+						if versionEntry.IsDir() {
+							candidates = append(candidates, filepath.Join(root, candidateEntry.Name(), versionEntry.Name()))
+						}
+					}
+				}
+			} else {
+				entries, err := os.ReadDir(root)
+				if os.IsNotExist(err) {
+					return nil, nil
+				}
+				if err != nil {
+					return nil, err
+				}
+				for _, entry := range entries {
+					if entry.IsDir() {
+						candidates = append(candidates, filepath.Join(root, entry.Name()))
+					}
+				}
+			}
+		}
+	} else {
+		root := filepath.Join(s.cacheRoot(), "catalog")
+		platforms, err := os.ReadDir(root)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, platform := range platforms {
+			if !platform.IsDir() {
+				continue
+			}
+			dir := filepath.Join(root, platform.Name())
+			if candidate != "" {
+				candidates = append(candidates, filepath.Join(dir, candidate+".json"))
+				continue
+			}
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				return nil, readErr
+			}
+			for _, entry := range entries {
+				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+					candidates = append(candidates, filepath.Join(dir, entry.Name()))
+				}
+			}
+		}
+	}
+	cutoff := time.Now().Add(-age)
+	var old []string
+	for _, path := range candidates {
+		latest, exists, err := newestModTime(path)
+		if err != nil {
+			return nil, err
+		}
+		if exists && latest.Before(cutoff) {
+			old = append(old, path)
+		}
+	}
+	return old, nil
+}
+
+func newestModTime(path string) (time.Time, bool, error) {
+	var latest time.Time
+	found := false
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		found = true
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+		return nil
+	})
+	return latest, found, err
 }
 
 func (s *Store) cachePaths(kind, candidate, version string) ([]string, error) {

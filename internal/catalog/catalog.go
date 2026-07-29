@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,14 +25,16 @@ type Platform struct {
 }
 
 type Release struct {
-	Candidate         string `json:"candidate"`
-	Version           string `json:"version"`
-	Vendor            string `json:"vendor,omitempty"`
-	SupportTier       string `json:"support_tier"`
-	URL               string `json:"url"`
-	ChecksumURL       string `json:"checksum_url,omitempty"`
-	Available         bool   `json:"available"`
-	AvailabilityKnown bool   `json:"availability_known"`
+	Candidate          string `json:"candidate"`
+	Version            string `json:"version"`
+	Vendor             string `json:"vendor,omitempty"`
+	SupportTier        string `json:"support_tier"`
+	IntegrityLevel     string `json:"integrity_level"`
+	URL                string `json:"url"`
+	ChecksumURL        string `json:"checksum_url,omitempty"`
+	Available          bool   `json:"available"`
+	AvailabilityKnown  bool   `json:"availability_known"`
+	AvailabilityStatus string `json:"availability_status"`
 }
 
 type Candidate struct {
@@ -64,6 +67,8 @@ var candidateNames = func() map[string]bool {
 type Client struct {
 	HTTP *http.Client
 }
+
+var ErrNetwork = errors.New("镜像网络错误")
 
 func NewClient() *Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -109,12 +114,29 @@ func (c *Client) List(ctx context.Context, candidate string, p Platform) ([]Rele
 		releases, err = c.tomcat(ctx, p)
 	}
 	if err != nil {
-		return nil, err
+		if len(releases) == 0 {
+			return nil, err
+		}
 	}
+	filtered := releases[:0]
+	for _, release := range releases {
+		if stableVersion(release.Version) {
+			filtered = append(filtered, release)
+		}
+	}
+	releases = filtered
 	for i := range releases {
 		releases[i].SupportTier = supportTier(candidate, releases[i].Vendor)
+		if releases[i].AvailabilityStatus == "" {
+			releases[i].AvailabilityStatus = "unchecked"
+		}
+		if releases[i].ChecksumURL != "" {
+			releases[i].IntegrityLevel = "checksum"
+		} else {
+			releases[i].IntegrityLevel = "https-only"
+		}
 	}
-	return uniqueSorted(releases, 40), nil
+	return uniqueSorted(releases, 40), err
 }
 
 func supportTier(candidate, vendor string) string {
@@ -127,26 +149,29 @@ func supportTier(candidate, vendor string) string {
 func (c *Client) get(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrNetwork, err)
 	}
 	req.Header.Set("User-Agent", "jkv/0.1")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrNetwork, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s: HTTP %s", rawURL, resp.Status)
+		return nil, fmt.Errorf("%w: %s: HTTP %s", ErrNetwork, rawURL, resp.Status)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrNetwork, err)
 	}
 	return b, nil
 }
 
 func (c *Client) CheckAvailability(ctx context.Context, releases []Release) []Release {
 	out := append([]Release(nil), releases...)
+	if len(out) == 0 {
+		return out
+	}
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 	workers := 12
@@ -158,7 +183,8 @@ func (c *Client) CheckAvailability(ctx context.Context, releases []Release) []Re
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				out[i].Available = c.downloadAvailable(ctx, out[i].URL)
+				out[i].AvailabilityStatus = c.downloadAvailability(ctx, out[i].URL)
+				out[i].Available = out[i].AvailabilityStatus == "available"
 				out[i].AvailabilityKnown = true
 			}
 		}()
@@ -171,7 +197,7 @@ func (c *Client) CheckAvailability(ctx context.Context, releases []Release) []Re
 	return out
 }
 
-func (c *Client) downloadAvailable(ctx context.Context, rawURL string) bool {
+func (c *Client) downloadAvailability(ctx context.Context, rawURL string) string {
 	check := func(method string, ranged bool) (int, error) {
 		requestCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
@@ -192,13 +218,22 @@ func (c *Client) downloadAvailable(ctx context.Context, rawURL string) bool {
 	}
 	status, err := check(http.MethodHead, false)
 	if err == nil && status >= 200 && status < 400 {
-		return true
+		return "available"
 	}
 	if err == nil && status != http.StatusForbidden && status != http.StatusMethodNotAllowed && status != http.StatusNotImplemented {
-		return false
+		return "missing"
 	}
 	status, err = check(http.MethodGet, true)
-	return err == nil && status >= 200 && status < 400
+	if err != nil {
+		return "unreachable"
+	}
+	if status >= 200 && status < 400 {
+		return "available"
+	}
+	if status == http.StatusNotFound || status == http.StatusGone {
+		return "missing"
+	}
+	return "unreachable"
 }
 
 var hrefRE = regexp.MustCompile(`(?i)href\s*=\s*["']?([^"' >]+)`)
@@ -226,7 +261,8 @@ func stableVersion(s string) bool {
 	u := strings.ToUpper(s)
 	return !strings.Contains(u, "SNAPSHOT") && !strings.Contains(u, "RC") &&
 		!strings.Contains(u, "MILESTONE") && !regexp.MustCompile(`(^|[.-])M[0-9]`).MatchString(u) &&
-		!strings.Contains(u, "ALPHA") && !strings.Contains(u, "BETA")
+		!strings.Contains(u, "ALPHA") && !strings.Contains(u, "BETA") &&
+		!regexp.MustCompile(`(^|[.+_-])EA([.+_-]|$)`).MatchString(u)
 }
 
 func archiveForPlatform(name string, p Platform) bool {
@@ -247,16 +283,16 @@ func (c *Client) java(ctx context.Context, p Platform) ([]Release, error) {
 	go func() { r, e := c.dragonwell(ctx, p); ch <- result{r, e} }()
 	go func() { r, e := c.bisheng(ctx, p); ch <- result{r, e} }()
 	var all []Release
-	var errs []string
+	var errs []error
 	for range 3 {
 		x := <-ch
 		all = append(all, x.r...)
 		if x.e != nil {
-			errs = append(errs, x.e.Error())
+			errs = append(errs, x.e)
 		}
 	}
-	if len(all) == 0 {
-		return nil, errors.New(strings.Join(errs, "; "))
+	if len(errs) > 0 {
+		return all, fmt.Errorf("java provider 部分失败: %w", errors.Join(errs...))
 	}
 	return all, nil
 }
@@ -270,6 +306,7 @@ func (c *Client) temurin(ctx context.Context, p Platform) ([]Release, error) {
 	type result struct{ r Release }
 	ch := make(chan result, len(majors))
 	var wg sync.WaitGroup
+	var failures atomic.Int32
 	for _, major := range majors {
 		major := major
 		wg.Add(1)
@@ -278,6 +315,7 @@ func (c *Client) temurin(ctx context.Context, p Platform) ([]Release, error) {
 			base := fmt.Sprintf("https://mirrors.tuna.tsinghua.edu.cn/Adoptium/%s/jdk/%s/%s/", major, p.Arch, osName)
 			body, err := c.get(ctx, base)
 			if err != nil {
+				failures.Add(1)
 				return
 			}
 			for _, link := range links(body) {
@@ -300,6 +338,9 @@ func (c *Client) temurin(ctx context.Context, p Platform) ([]Release, error) {
 	var out []Release
 	for x := range ch {
 		out = append(out, x.r)
+	}
+	if failures.Load() > 0 {
+		return out, fmt.Errorf("%w: Temurin %d 个版本目录读取失败", ErrNetwork, failures.Load())
 	}
 	return out, nil
 }
@@ -427,14 +468,20 @@ func (c *Client) maven(ctx context.Context, p Platform) ([]Release, error) {
 		}
 		bases = append(bases, resolve(root, dir+"binaries/"))
 	}
-	return parallelReleases(bases, 8, func(base string) []Release {
+	var failures atomic.Int32
+	out := parallelReleases(bases, 8, func(base string) []Release {
 		b, err := c.get(ctx, base)
 		if err != nil {
+			failures.Add(1)
 			return nil
 		}
 		r, _ := c.archivesFromBody("maven", base, b, `apache-maven-([0-9][0-9A-Za-z.+-]*)-bin`, p, false)
 		return r
-	}), nil
+	})
+	if failures.Load() > 0 {
+		return out, fmt.Errorf("%w: Maven %d 个版本目录读取失败", ErrNetwork, failures.Load())
+	}
+	return out, nil
 }
 
 func (c *Client) flatArchives(ctx context.Context, candidate, base, pattern string, p Platform, zipOnly bool) ([]Release, error) {

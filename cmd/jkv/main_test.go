@@ -36,6 +36,17 @@ func TestSelectReleaseAlias(t *testing.T) {
 	}
 }
 
+func TestSelectReleaseSkipsKnownUnavailable(t *testing.T) {
+	releases := []catalog.Release{
+		{Candidate: "maven", Version: "4.0", AvailabilityKnown: true},
+		{Candidate: "maven", Version: "3.9", AvailabilityKnown: true, Available: true},
+	}
+	got, err := selectRelease(releases, "")
+	if err != nil || got.Version != "3.9" {
+		t.Fatalf("selected = %#v, %v", got, err)
+	}
+}
+
 func TestReleaseGroupsJavaVendorOrder(t *testing.T) {
 	releases := []catalog.Release{
 		{Vendor: "bisheng", Version: "21-bisheng"},
@@ -191,7 +202,7 @@ func TestCompletionCoversEveryTopLevelNameAndStaticArgument(t *testing.T) {
 		{[]string{"env", "e"}, []string{"apply", "clear", "defaults", "init"}},
 		{[]string{"init", "in"}, []string{"bash", "fish", "powershell", "pwsh", "zsh"}},
 		{[]string{"mirror", "m"}, []string{"gradle", "maven", "status"}},
-		{[]string{"clean", "cl"}, []string{"--dry-run", "catalog", "downloads"}},
+		{[]string{"clean", "cl"}, []string{"--dry-run", "--older-than", "catalog", "downloads", "partials"}},
 	}
 	for _, test := range tests {
 		for _, command := range test.commands {
@@ -374,6 +385,16 @@ func TestRunHomeJSON(t *testing.T) {
 func TestRunDoctorJSON(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("JKV_DIR", root)
+	originalClient := doctorHTTPClient
+	doctorHTTPClient = &http.Client{Transport: testRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})}
+	defer func() { doctorHTTPClient = originalClient }()
 	output := captureStdout(t, func() error {
 		return run(context.Background(), []string{"doctor", "--json"})
 	})
@@ -381,10 +402,17 @@ func TestRunDoctorJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &got); err != nil {
 		t.Fatalf("doctor JSON = %q: %v", output, err)
 	}
-	if got["root"] != root || got["os"] == "" || got["arch"] == "" || got["writable"] != true {
+	if got["root"] != "<JKV_DIR>" || got["os"] == "" || got["arch"] == "" || got["writable"] != true {
 		t.Fatalf("doctor = %#v", got)
 	}
+	if mirrors, ok := got["mirrors"].([]any); !ok || len(mirrors) != 3 {
+		t.Fatalf("doctor mirrors = %#v", got["mirrors"])
+	}
 }
+
+type testRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestExitCodeCategories(t *testing.T) {
 	tests := []struct {
@@ -396,6 +424,8 @@ func TestExitCodeCategories(t *testing.T) {
 		{errors.New("下载失败: HTTP 503 Service Unavailable"), 4},
 		{errors.New("SHA-256 不匹配"), 5},
 		{errors.New("已安装 java 21"), 6},
+		{fmt.Errorf("dial failed: %w", catalog.ErrNetwork), 4},
+		{fmt.Errorf("bad archive: %w", store.ErrIntegrity), 5},
 	}
 	for _, test := range tests {
 		if got := exitCodeFor(test.err); got != test.want {
@@ -477,7 +507,7 @@ func TestEnvMirrorCleanAndInitCommands(t *testing.T) {
 	}
 	if got := captureStdout(t, func() error {
 		return cmdEnv(s, []string{"apply", "--shell", "fish"})
-	}); !strings.Contains(got, "fish_add_path") {
+	}); !strings.Contains(got, "set -gx PATH") {
 		t.Fatalf("fish env = %q", got)
 	}
 	if got := captureStdout(t, func() error {
@@ -596,6 +626,9 @@ func TestFormattingAndOptionHelpers(t *testing.T) {
 	}
 	if formatBytes(512) != "512 B" || !strings.Contains(formatBytes(2048), "KiB") {
 		t.Fatal("byte formatting failed")
+	}
+	if got := padRight("中文", 6); got != "中文  " {
+		t.Fatalf("CJK padding = %q", got)
 	}
 	if shQuote("a'b") != `'a'\''b'` || psQuote("a'b") != "'a''b'" || fishQuote("a'b") != `'a\'b'` {
 		t.Fatal("shell quoting failed")

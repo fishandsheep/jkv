@@ -57,12 +57,22 @@ func TestProvidersLive(t *testing.T) {
 	}
 	for _, candidate := range Candidates {
 		t.Run(candidate.Name, func(t *testing.T) {
-			r, err := NewClient().List(context.Background(), candidate.Name, Platform{OS: "linux", Arch: "x64"})
+			client := NewClient()
+			r, err := client.List(context.Background(), candidate.Name, Platform{OS: "linux", Arch: "x64"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if len(r) == 0 {
 				t.Fatal("provider returned no releases")
+			}
+			sampleCount := min(5, len(r))
+			samples := client.CheckAvailability(context.Background(), r[:sampleCount])
+			available := false
+			for _, sample := range samples {
+				available = available || sample.Available
+			}
+			if !available {
+				t.Fatalf("no representative artifact available: %#v", samples)
 			}
 		})
 	}
@@ -97,10 +107,17 @@ func TestCheckAvailability(t *testing.T) {
 	if !got[0].Available || !got[1].Available || got[2].Available {
 		t.Fatalf("availability = %#v", got)
 	}
+	if got[0].AvailabilityStatus != "available" || got[1].AvailabilityStatus != "available" ||
+		got[2].AvailabilityStatus != "missing" {
+		t.Fatalf("availability status = %#v", got)
+	}
 	for _, release := range got {
 		if !release.AvailabilityKnown {
 			t.Fatal("availability was not marked as checked")
 		}
+	}
+	if empty := (&Client{}).CheckAvailability(context.Background(), nil); len(empty) != 0 {
+		t.Fatalf("empty availability = %#v", empty)
 	}
 }
 
@@ -108,7 +125,8 @@ func TestCatalogFixtures(t *testing.T) {
 	client := fixtureClient(t, func(rawURL string) (int, string) {
 		switch {
 		case strings.Contains(rawURL, "/Adoptium/"):
-			return 200, `<a href="OpenJDK21U-jdk_x64_linux_hotspot_21.0.8_9.tar.gz">jdk</a>`
+			return 200, `<a href="OpenJDK21U-jdk_x64_linux_hotspot_21.0.8_9.tar.gz">jdk</a>
+				<a href="OpenJDK21U-jdk_x64_linux_hotspot_22-ea_1.tar.gz">ea</a>`
 		case rawURL == "https://dragonwell-jdk.io/releases.json":
 			return 200, `{"oss":{"standard":{"version21":"21.0.8","xurl21":"https://oss.test/dragonwell.tar.gz"}}}`
 		case strings.Contains(rawURL, "bisheng_jdk"):
@@ -161,6 +179,9 @@ func TestCatalogFixtures(t *testing.T) {
 			}
 			found := false
 			for _, release := range got {
+				if !stableVersion(release.Version) {
+					t.Fatalf("prerelease escaped filter: %#v", release)
+				}
 				if release.Version == tc.version && release.SupportTier == tc.tier {
 					found = true
 				}
@@ -198,7 +219,7 @@ func TestCatalogErrorAndFallbacks(t *testing.T) {
 }
 
 func TestArchiveSelectionAndSorting(t *testing.T) {
-	if stableVersion("1.0-RC1") || stableVersion("1.0-beta") || !stableVersion("1.0.1") {
+	if stableVersion("1.0-RC1") || stableVersion("22-ea+1") || stableVersion("1.0-beta") || !stableVersion("1.0.1") {
 		t.Fatal("stableVersion classification failed")
 	}
 	if !archiveForPlatform("x.zip", Platform{OS: "windows"}) ||

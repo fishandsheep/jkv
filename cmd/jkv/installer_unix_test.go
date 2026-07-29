@@ -108,6 +108,34 @@ func TestUnixInstallerUninstallPreservesCandidates(t *testing.T) {
 	}
 }
 
+func TestUnixInstallerPurgeSafetyAndConfirmationPrecedeMutation(t *testing.T) {
+	server := installerFixtureServer(t, false)
+	defer server.Close()
+	home := t.TempDir()
+	installDir := filepath.Join(t.TempDir(), "nested", "jkv")
+	runUnixInstaller(t, home, installDir, server.URL, "", nil)
+
+	cmd := unixInstallerCommand(home, installDir, server.URL, "", []string{"--purge"})
+	if output, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(output), "必须同时使用 --yes") {
+		t.Fatalf("unconfirmed purge = %v\n%s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(installDir, "bin", "jkv")); err != nil {
+		t.Fatalf("unconfirmed purge removed binary: %v", err)
+	}
+	profilePath := filepath.Join(home, ".bashrc")
+	if profile, err := os.ReadFile(profilePath); err != nil || !strings.Contains(string(profile), "# >>> jkv managed >>>") {
+		t.Fatalf("unconfirmed purge modified profile: %v\n%s", err, profile)
+	}
+
+	dangerous := unixInstallerCommand(home, home+string(os.PathSeparator), server.URL, "", []string{"--purge", "--yes"})
+	if output, err := dangerous.CombinedOutput(); err == nil || !strings.Contains(string(output), "拒绝清理危险目录") {
+		t.Fatalf("dangerous purge = %v\n%s", err, output)
+	}
+	if _, err := os.Stat(home); err != nil {
+		t.Fatalf("dangerous purge removed HOME: %v", err)
+	}
+}
+
 func TestUnixInstallerConfiguresFish(t *testing.T) {
 	server := installerFixtureServer(t, false)
 	defer server.Close()

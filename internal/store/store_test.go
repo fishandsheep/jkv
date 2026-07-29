@@ -588,6 +588,64 @@ func TestInspectCacheDoesNotDelete(t *testing.T) {
 	}
 }
 
+func TestCleanCacheByAge(t *testing.T) {
+	s := New(t.TempDir())
+	oldPath := filepath.Join(s.cacheRoot(), "downloads", "maven", "old", "archive")
+	newPath := filepath.Join(s.cacheRoot(), "downloads", "maven", "new", "archive")
+	for _, path := range []string{oldPath, newPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("cache"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := s.InspectCacheOlderThan("downloads", "maven", "", 24*time.Hour)
+	if err != nil || preview.Files != 1 {
+		t.Fatalf("age preview = %#v, %v", preview, err)
+	}
+	result, err := s.CleanCacheOlderThan("downloads", "maven", "", 24*time.Hour)
+	if err != nil || result.Files != 1 {
+		t.Fatalf("age clean = %#v, %v", result, err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old cache remains: %v", err)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("new cache removed: %v", err)
+	}
+}
+
+func TestCleanInterruptedDownloadsByAge(t *testing.T) {
+	s := New(t.TempDir())
+	path := filepath.Join(s.Root, "partials", "downloads", "java", "21", "archive.partial")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := s.InspectPartialsOlderThan("java", "", 24*time.Hour)
+	if err != nil || preview.Files != 1 {
+		t.Fatalf("partial preview = %#v, %v", preview, err)
+	}
+	result, err := s.CleanPartialsOlderThan("java", "", 24*time.Hour)
+	if err != nil || result.Files != 1 {
+		t.Fatalf("partial clean = %#v, %v", result, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("partial remains: %v", err)
+	}
+}
+
 func TestStoreQueriesAndRemoval(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("JKV_DIR", root)
@@ -690,6 +748,27 @@ func TestVerifyChecksumSuccessAndMismatch(t *testing.T) {
 	}
 	if err := s.verifyChecksum(context.Background(), server.URL+"/mismatch.sha256", digest); !errors.Is(err, ErrIntegrity) {
 		t.Fatalf("mismatch = %v", err)
+	}
+}
+
+func TestVerifyChecksumRetriesTransientFailure(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(w, "retry", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(w, digest+"\n")
+	}))
+	defer server.Close()
+	s := New(t.TempDir())
+	s.RetryBase = time.Millisecond
+	if err := s.verifyChecksum(context.Background(), server.URL+"/archive.sha256", digest); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("checksum requests = %d", requests.Load())
 	}
 }
 

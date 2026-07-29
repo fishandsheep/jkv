@@ -107,12 +107,12 @@ func completions(ctx context.Context, s *store.Store, args []string) []string {
 		}
 	case "clean":
 		if len(args) == 2 {
-			return matching([]string{"downloads", "catalog", "--dry-run"}, prefix)
+			return matching([]string{"downloads", "catalog", "partials", "--dry-run", "--older-than"}, prefix)
 		}
-		if len(args) == 3 && (args[1] == "downloads" || args[1] == "catalog") {
+		if len(args) == 3 && (args[1] == "downloads" || args[1] == "catalog" || args[1] == "partials") {
 			return matching(candidates, prefix)
 		}
-		if len(args) == 4 && args[1] == "downloads" && catalog.IsCandidate(args[2]) {
+		if len(args) == 4 && (args[1] == "downloads" || args[1] == "partials") && catalog.IsCandidate(args[2]) {
 			return matching(s.CachedVersions(args[2]), prefix)
 		}
 	}

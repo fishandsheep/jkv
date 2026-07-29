@@ -52,8 +52,29 @@ jobs:
       - name: ShellCheck
         run: |
           sudo apt-get update
-          sudo apt-get install --yes shellcheck
+          sudo apt-get install --yes shellcheck fish zsh
           shellcheck install.sh
+      - name: Fish and Zsh runtime smoke
+        run: |
+          root="$RUNNER_TEMP/jkv-shells"
+          mkdir -p "$root/bin"
+          go build -trimpath -o "$root/bin/jkv" ./cmd/jkv
+          mkdir -p "$root/candidates/java/21/bin"
+          JKV_DIR="$root" "$root/bin/jkv" default java 21
+          JKV_DIR="$root" PATH="$root/bin:$PATH" fish -c '
+            jkv init fish | source
+            jkv use java 21
+            test "$JKV_CURRENT_JAVA" = 21
+            jkv env clear | source
+            complete -C "jkv in f" | grep -q fish
+          '
+          JKV_DIR="$root" PATH="$root/bin:$PATH" zsh -c '
+            eval "$(jkv init zsh)"
+            jkv use java 21
+            test "$JKV_CURRENT_JAVA" = 21
+            eval "$(jkv env clear --shell zsh)"
+            (( $+functions[_jkv_complete] ))
+          '
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
@@ -122,7 +143,7 @@ jobs:
           test "$(go env GOARCH)" = "${{ matrix.goarch }}"
       - name: Test and vet
         run: |
-          go test ./...
+          go test -short ./...
           go vet ./...
       - name: Build and execute
         run: |
@@ -208,13 +229,22 @@ jobs:
       - name: Test and vet
         shell: pwsh
         run: |
-          go test ./...
+          go test -short ./...
           go vet ./...
       - name: Build and execute
         shell: pwsh
         run: |
           go build -trimpath -o jkv-ci.exe ./cmd/jkv
           & .\jkv-ci.exe version
+          $shellRoot = Join-Path $env:RUNNER_TEMP 'jkv-shell'
+          New-Item -ItemType Directory -Force (Join-Path $shellRoot 'bin') | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $shellRoot 'candidates\java\21\bin') | Out-Null
+          Copy-Item .\jkv-ci.exe (Join-Path $shellRoot 'bin\jkv.exe')
+          $env:JKV_DIR = $shellRoot
+          & (Join-Path $shellRoot 'bin\jkv.exe') default java 21
+          Invoke-Expression ((& (Join-Path $shellRoot 'bin\jkv.exe') init powershell) -join [Environment]::NewLine)
+          jkv use java 21
+          if ($env:JKV_CURRENT_JAVA -ne '21') { throw 'PowerShell use did not update current version' }
       - name: Run PowerShell source installer
         shell: pwsh
         run: |
@@ -278,3 +308,21 @@ jobs:
             Remove-Item Env:JKV_DOWNLOAD_BASE -ErrorAction SilentlyContinue
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
+
+  required:
+    name: required
+    if: always()
+    needs: [quality, cross-build, native-unix, native-windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every quality, build, and native test job
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          CROSS_BUILD: ${{ needs.cross-build.result }}
+          NATIVE_UNIX: ${{ needs.native-unix.result }}
+          NATIVE_WINDOWS: ${{ needs.native-windows.result }}
+        run: |
+          test "$QUALITY" = success
+          test "$CROSS_BUILD" = success
+          test "$NATIVE_UNIX" = success
+          test "$NATIVE_WINDOWS" = success
