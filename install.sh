@@ -3,7 +3,6 @@ set -eu
 
 JKV_DIR=${JKV_DIR:-"$HOME/.jkv"}
 JKV_REPO=${JKV_REPO:-fishandsheep/jkv}
-BIN_DIR="$JKV_DIR/bin"
 MANAGED_BEGIN='# >>> jkv managed >>>'
 MANAGED_END='# <<< jkv managed <<<'
 modify_profile=true
@@ -22,6 +21,25 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+case "$JKV_DIR" in
+  /*) ;;
+  *) JKV_DIR="$(pwd)/$JKV_DIR" ;;
+esac
+if [ "$action" = install ]; then
+  mkdir -p "$(dirname "$JKV_DIR")"
+fi
+if [ -d "$JKV_DIR" ]; then
+  JKV_DIR=$(CDPATH= cd "$JKV_DIR" && pwd -P)
+else
+  parent=$(CDPATH= cd "$(dirname "$JKV_DIR")" 2>/dev/null && pwd -P) || {
+    echo "安装目录的父目录不存在: $JKV_DIR" >&2
+    exit 2
+  }
+  JKV_DIR="$parent/$(basename "$JKV_DIR")"
+fi
+home_canonical=$(CDPATH= cd "$HOME" && pwd -P)
+BIN_DIR="$JKV_DIR/bin"
+
 if [ "${JKV_MODIFY_PROFILE:-1}" = 0 ]; then
   modify_profile=false
 fi
@@ -37,24 +55,40 @@ esac
 remove_managed_block() {
   [ -f "$rc" ] || return 0
   tmp=$(mktemp "${rc}.jkv.XXXXXX")
-  awk -v begin="$MANAGED_BEGIN" -v end="$MANAGED_END" '
-    $0 == begin { managed=1; next }
-    $0 == end { managed=0; next }
+  if ! awk -v begin="$MANAGED_BEGIN" -v end="$MANAGED_END" '
+    $0 == begin {
+      if (managed == 1) exit 42
+      managed=1
+      next
+    }
+    $0 == end {
+      if (managed != 1) exit 42
+      managed=0
+      next
+    }
     managed != 1 && index($0, "# jkv init") == 0 { print }
-  ' "$rc" > "$tmp"
-  mv -f "$tmp" "$rc"
+    END { if (managed == 1) exit 42 }
+  ' "$rc" > "$tmp"; then
+    rm -f "$tmp"
+    echo "shell 配置中的 jkv managed block 不完整，拒绝修改: $rc" >&2
+    exit 1
+  fi
+  cp "$tmp" "$rc"
+  rm -f "$tmp"
 }
 
 if [ "$action" = uninstall ]; then
-  remove_managed_block
-  rm -f "$BIN_DIR/jkv"
   if [ "$purge" = true ]; then
+    dangerous=false
     case "$JKV_DIR" in
-      ""|"/"|"."|"$HOME")
-        echo "拒绝清理危险目录: $JKV_DIR" >&2
-        exit 2
-        ;;
+      ""|"/"|"."|"$home_canonical")
+        dangerous=true ;;
     esac
+    case "$home_canonical/" in "$JKV_DIR/"*) dangerous=true ;; esac
+    if [ "$dangerous" = true ]; then
+      echo "拒绝清理危险目录: $JKV_DIR" >&2
+      exit 2
+    fi
     if [ "$assume_yes" != true ]; then
       if [ ! -t 0 ]; then
         echo "--purge 在非交互环境必须同时使用 --yes" >&2
@@ -64,6 +98,10 @@ if [ "$action" = uninstall ]; then
       read -r answer
       case "$answer" in y|Y|yes|YES) ;; *) echo "已取消"; exit 0 ;; esac
     fi
+  fi
+  remove_managed_block
+  rm -f "$BIN_DIR/jkv"
+  if [ "$purge" = true ]; then
     rm -rf "$JKV_DIR"
     echo "jkv 已彻底卸载: $JKV_DIR（不可恢复）"
   else
@@ -102,8 +140,11 @@ else
   embedded_base='__JKV_CN_DOWNLOAD_BASE__'
   case "$embedded_base" in __JKV_*) embedded_base= ;; esac
   primary_base=${JKV_DOWNLOAD_BASE:-"$embedded_base"}
-  if [ -n "${JKV_VERSION:-}" ]; then
-    github_base="https://github.com/$JKV_REPO/releases/download/$JKV_VERSION"
+  embedded_version='__JKV_RELEASE_VERSION__'
+  case "$embedded_version" in __JKV_*) embedded_version= ;; esac
+  release_version=${JKV_VERSION:-"$embedded_version"}
+  if [ -n "$release_version" ]; then
+    github_base="https://github.com/$JKV_REPO/releases/download/$release_version"
   else
     github_base="https://github.com/$JKV_REPO/releases/latest/download"
   fi
@@ -118,11 +159,11 @@ else
     previous_base=$base
     url="$base/$asset"
     echo "下载 $asset: $base"
-    if ! curl -fL --retry 3 --connect-timeout 10 -o "$tmp" "$url"; then
+    if ! curl -fL --retry 3 --connect-timeout 10 --max-time 1800 --speed-time 30 --speed-limit 1024 -o "$tmp" "$url"; then
       echo "下载失败，尝试后备地址..." >&2
       continue
     fi
-    if ! curl -fL --retry 3 --connect-timeout 10 -o "$sum_file" "$url.sha256"; then
+    if ! curl -fL --retry 3 --connect-timeout 10 --max-time 120 --speed-time 30 --speed-limit 1 -o "$sum_file" "$url.sha256"; then
       echo "校验文件下载失败，尝试后备地址..." >&2
       continue
     fi
@@ -149,6 +190,7 @@ fi
 chmod 755 "$BIN_DIR/jkv"
 
 if [ "$modify_profile" = true ]; then
+  echo "将更新 shell 配置: $rc"
   mkdir -p "$(dirname "$rc")"
   remove_managed_block
   {

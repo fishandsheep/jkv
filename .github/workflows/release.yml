@@ -8,7 +8,25 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          cache: false
+      - name: Release gate
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          go test -short ./...
+          go vet ./...
+          go run honnef.co/go/tools/cmd/staticcheck@2026.1 ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
   build:
+    needs: verify
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -51,6 +69,7 @@ jobs:
           if-no-files-found: error
 
   installers:
+    needs: verify
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -66,6 +85,7 @@ jobs:
           cp install.sh install.ps1 dist/
           stamped="${CN_DOWNLOAD_BASE%/}/${GITHUB_REF_NAME}"
           sed -i "s|__JKV_CN_DOWNLOAD_BASE__|$stamped|g" dist/install.sh dist/install.ps1
+          sed -i "s|__JKV_RELEASE_VERSION__|${GITHUB_REF_NAME}|g" dist/install.sh dist/install.ps1
           (cd dist && sha256sum install.sh > install.sh.sha256)
           (cd dist && sha256sum install.ps1 > install.ps1.sha256)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -81,16 +101,29 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
       - name: Attest release assets
+        id: attest
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
         with:
           subject-path: dist/*
+      - name: Export provenance bundle and verify release layout
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          cp "$BUNDLE_PATH" "dist/${GITHUB_REF_NAME}.provenance.sigstore.json"
+          test "$(find dist -maxdepth 1 -type f -name 'jkv-*.spdx.json' | wc -l)" -eq 6
+          test "$(find dist -maxdepth 1 -type f -name 'jkv-*.sha256' | wc -l)" -eq 6
+          (cd dist && for sum in *.sha256; do sha256sum --check "$sum"; done)
+          test "$(./dist/jkv-linux-amd64 version)" = "jkv ${GITHUB_REF_NAME}"
+          test -s "dist/${GITHUB_REF_NAME}.provenance.sigstore.json"
       - name: Upload to domestic object storage
         if: ${{ vars.JKV_CN_S3_URI != '' }}
         env:
@@ -101,10 +134,20 @@ jobs:
           CN_S3_ENDPOINT: ${{ vars.JKV_CN_S3_ENDPOINT }}
         run: |
           target="${CN_S3_URI%/}/${GITHUB_REF_NAME}/"
+          case "$GITHUB_REF_NAME" in *-*) channel=beta ;; *) channel=latest ;; esac
+          channel_target="${CN_S3_URI%/}/${channel}/"
           if [ -n "$CN_S3_ENDPOINT" ]; then
             aws s3 cp dist/ "$target" --recursive --endpoint-url "$CN_S3_ENDPOINT"
+            aws s3 cp dist/install.sh "$channel_target/install.sh" --endpoint-url "$CN_S3_ENDPOINT"
+            aws s3 cp dist/install.sh.sha256 "$channel_target/install.sh.sha256" --endpoint-url "$CN_S3_ENDPOINT"
+            aws s3 cp dist/install.ps1 "$channel_target/install.ps1" --endpoint-url "$CN_S3_ENDPOINT"
+            aws s3 cp dist/install.ps1.sha256 "$channel_target/install.ps1.sha256" --endpoint-url "$CN_S3_ENDPOINT"
           else
             aws s3 cp dist/ "$target" --recursive
+            aws s3 cp dist/install.sh "$channel_target/install.sh"
+            aws s3 cp dist/install.sh.sha256 "$channel_target/install.sh.sha256"
+            aws s3 cp dist/install.ps1 "$channel_target/install.ps1"
+            aws s3 cp dist/install.ps1.sha256 "$channel_target/install.ps1.sha256"
           fi
       - name: Create GitHub fallback release
         env:
@@ -112,8 +155,13 @@ jobs:
         run: |
           flags=()
           case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes" ]; then
+            echo "缺少版本发布说明: $notes" >&2
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" dist/* \
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file "$notes" \
             "${flags[@]}"

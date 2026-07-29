@@ -18,6 +18,12 @@ if ($env:JKV_ASSUME_YES -eq '1') { $Yes = $true }
 function Remove-JkvProfileBlock {
   if (-not (Test-Path $PROFILE)) { return }
   $text = Get-Content $PROFILE -Raw
+  $beginMatches = [Regex]::Matches($text, '(?m)^' + [Regex]::Escape($managedBegin) + '$')
+  $endMatches = [Regex]::Matches($text, '(?m)^' + [Regex]::Escape($managedEnd) + '$')
+  if ($beginMatches.Count -ne $endMatches.Count -or $beginMatches.Count -gt 1 -or
+      ($beginMatches.Count -eq 1 -and $beginMatches[0].Index -gt $endMatches[0].Index)) {
+    throw "PowerShell profile 中的 jkv managed block 不完整，拒绝修改: $PROFILE"
+  }
   $pattern = '(?ms)^' + [Regex]::Escape($managedBegin) + '\r?\n.*?^' +
     [Regex]::Escape($managedEnd) + '\r?\n?'
   $text = [Regex]::Replace($text, $pattern, '')
@@ -26,16 +32,19 @@ function Remove-JkvProfileBlock {
 }
 
 $fullInstallDir = [IO.Path]::GetFullPath($InstallDir)
+$fullInstallDir = [IO.Path]::TrimEndingDirectorySeparator($fullInstallDir)
 $binDir = Join-Path $fullInstallDir 'bin'
 $target = Join-Path $binDir 'jkv.exe'
 
 if ($Uninstall) {
-  Remove-JkvProfileBlock
-  Remove-Item -Force -ErrorAction SilentlyContinue $target
   if ($Purge) {
-    $homePath = [IO.Path]::GetFullPath($HOME)
-    $rootPath = [IO.Path]::GetPathRoot($fullInstallDir)
-    if (-not $fullInstallDir -or $fullInstallDir -eq $homePath -or $fullInstallDir -eq $rootPath) {
+    $homePath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($HOME))
+    $rootPath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetPathRoot($fullInstallDir))
+    $sameAsHome = [StringComparer]::OrdinalIgnoreCase.Equals($fullInstallDir, $homePath)
+    $sameAsRoot = [StringComparer]::OrdinalIgnoreCase.Equals($fullInstallDir, $rootPath)
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $isHomeAncestor = $homePath.StartsWith("$fullInstallDir$separator", [StringComparison]::OrdinalIgnoreCase)
+    if (-not $fullInstallDir -or $sameAsHome -or $sameAsRoot -or $isHomeAncestor) {
       throw "拒绝清理危险目录: $fullInstallDir"
     }
     if (-not $Yes) {
@@ -48,6 +57,10 @@ if ($Uninstall) {
         return
       }
     }
+  }
+  Remove-JkvProfileBlock
+  Remove-Item -Force -ErrorAction SilentlyContinue $target
+  if ($Purge) {
     Remove-Item -Recurse -Force $fullInstallDir
     Write-Host "jkv 已彻底卸载: $fullInstallDir（不可恢复）"
   } else {
@@ -95,8 +108,11 @@ if ($buildFromSource) {
   $asset = "jkv-windows-$arch.exe"
   $embeddedBase = '__JKV_CN_DOWNLOAD_BASE__'
   if ($embeddedBase.StartsWith('__JKV_')) { $embeddedBase = $null }
-  $githubBase = if ($env:JKV_VERSION) {
-    "https://github.com/$repo/releases/download/$($env:JKV_VERSION)"
+  $embeddedVersion = '__JKV_RELEASE_VERSION__'
+  if ($embeddedVersion.StartsWith('__JKV_')) { $embeddedVersion = $null }
+  $releaseVersion = if ($env:JKV_VERSION) { $env:JKV_VERSION } else { $embeddedVersion }
+  $githubBase = if ($releaseVersion) {
+    "https://github.com/$repo/releases/download/$releaseVersion"
   } else {
     "https://github.com/$repo/releases/latest/download"
   }
@@ -108,13 +124,27 @@ if ($buildFromSource) {
   $tmp = Join-Path $binDir ".$asset.$([Guid]::NewGuid().ToString('N')).tmp"
   $sumFile = "$tmp.sha256"
   $downloaded = $false
+  function Invoke-JkvDownload {
+    param([string]$Uri, [string]$OutFile, [int]$TimeoutSec)
+    $lastError = $null
+    foreach ($attempt in 1..3) {
+      try {
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec $TimeoutSec $Uri -OutFile $OutFile
+        return
+      } catch {
+        $lastError = $_
+        if ($attempt -lt 3) { Start-Sleep -Seconds ([Math]::Pow(2, $attempt - 1)) }
+      }
+    }
+    throw $lastError
+  }
   try {
     foreach ($base in $bases) {
       $url = "$base/$asset"
       Write-Host "下载 ${asset}: $base"
       try {
-        Invoke-WebRequest -UseBasicParsing $url -OutFile $tmp
-        Invoke-WebRequest -UseBasicParsing "$url.sha256" -OutFile $sumFile
+        Invoke-JkvDownload -Uri $url -OutFile $tmp -TimeoutSec 1800
+        Invoke-JkvDownload -Uri "$url.sha256" -OutFile $sumFile -TimeoutSec 120
       } catch {
         Write-Warning "下载失败，尝试后备地址: $($_.Exception.Message)"
         continue
@@ -140,6 +170,7 @@ if (($env:Path -split [IO.Path]::PathSeparator) -notcontains $binDir) {
 }
 
 if ($modifyProfile) {
+  Write-Host "将更新 PowerShell 配置: $PROFILE"
   $profileDir = Split-Path -Parent $PROFILE
   New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
   Remove-JkvProfileBlock

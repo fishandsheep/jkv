@@ -1,6 +1,7 @@
 # jkv
 
 [![CI](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml/badge.svg)](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml)
+[![Mirror health](https://github.com/fishandsheep/jkv/actions/workflows/mirror-health.yml/badge.svg)](https://github.com/fishandsheep/jkv/actions/workflows/mirror-health.yml)
 
 面向国内网络的 JVM 工具版本管理器。思路接近 SDKMAN：在线列版本、下载解压、保存多版本、按终端或项目切换；区别是只接入可脚本化的国内稳定源，并原生支持 Linux、macOS、Windows。
 
@@ -25,22 +26,30 @@
 Linux / macOS：
 
 ```sh
-curl -fsSL <国内安装脚本地址>/install.sh | sh
+curl -fsSL <JKV_CN_DOWNLOAD_BASE>/beta/install.sh | sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm <国内安装脚本地址>/install.ps1 | iex
+irm <JKV_CN_DOWNLOAD_BASE>/beta/install.ps1 | iex
 ```
 
 正式发布页会给出已配置的国内安装脚本地址。安装器优先从国内对象存储下载 jkv 本身；仅在传输失败或校验文件不可用时回退 GitHub。JDK、Maven、Gradle 等工具介质始终来自各自公共官方国内镜像。每个 jkv 二进制都强制校验 SHA-256；校验不匹配不会切换来源。
+
+固定版本入口为 `<JKV_CN_DOWNLOAD_BASE>/v0.2.0-beta.1/install.sh`（PowerShell 对应 `.ps1`）；`beta/` 是便捷指针。GitHub 固定版本后备入口为 `https://github.com/fishandsheep/jkv/releases/download/v0.2.0-beta.1/install.sh`。国内域名在对象存储/CDN配置完成后替换；未配置前发布工作流会明确失败，不会退化成 GitHub 优先。
 
 默认安装到 `~/.jkv`，无需 Go 或管理员权限。重新打开终端后验证：
 
 ```sh
 jkv version
 jkv list
+```
+
+已有 Go 工具链也可使用固定 module 版本：
+
+```sh
+go install github.com/fishandsheep/jkv/cmd/jkv@v0.2.0-beta.1
 ```
 
 可用 `JKV_DIR` 修改安装目录，`JKV_DOWNLOAD_BASE` 指定首选 jkv 制品目录，`JKV_FALLBACK_BASE` 指定后备目录。`--no-modify-profile` 不修改 shell 配置；`--uninstall` 只移除 jkv 与托管配置，保留已安装工具；`--purge --yes` 才彻底删除数据。
@@ -126,6 +135,15 @@ jkv 不含遥测、账号、广告或后台常驻进程。网络请求仅用于�
 ## 选源原则
 
 详见 [docs/sources.md](docs/sources.md)。核心标准：国内主体长期维护、HTTPS、无需登录、目录或元数据可机器读取、当前仍同步稳定版。只有 GitHub Release、网盘、博客转存、需人工点击或版本长期滞后的生态暂不支持。
+
+## 与其他工具的边界
+
+| 工具 | jkv 的差异 |
+|---|---|
+| SDKMAN | jkv 原生支持 Windows，使用 Go 单二进制，工具发现不依赖境外 broker；candidate 数量更少 |
+| asdf | jkv 不运行第三方插件脚本，内置 provider 只访问审核过的公共官方国内源；扩展性更保守 |
+
+jkv 选择“窄而可靠”，不追求 candidate 数量、企业私服管理或任意插件。Beta 真实测试任务和退出条件见 [docs/beta-testing.md](docs/beta-testing.md)，维护与归档政策见 [GOVERNANCE.md](GOVERNANCE.md)。
 
 ## 开发
 

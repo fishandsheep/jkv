@@ -33,7 +33,10 @@ type Store struct {
 	NoProgressTimeout time.Duration
 }
 
-var ErrIntegrity = errors.New("完整性校验失败")
+var (
+	ErrIntegrity = errors.New("完整性校验失败")
+	ErrNetwork   = errors.New("下载网络错误")
+)
 
 type InstallOptions struct {
 	RequireChecksum bool
@@ -148,21 +151,21 @@ func (s *Store) InstallWithOptions(ctx context.Context, r catalog.Release, progr
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	archive, err := s.obtainArchive(ctx, r, progress)
-	if err != nil {
-		return err
-	}
 	tmpRoot, err := os.MkdirTemp(filepath.Dir(dest), ".jkv-install-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpRoot)
+	archive, err := s.obtainArchive(ctx, r, filepath.Join(tmpRoot, "archive"), progress)
+	if err != nil {
+		return err
+	}
 	extract := filepath.Join(tmpRoot, "extract")
 	if err := os.MkdirAll(extract, 0o755); err != nil {
 		return err
 	}
 	if err := unpack(archive, r.URL, extract); err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrIntegrity, err)
 	}
 	root, err := flattenedRoot(extract)
 	if err != nil {
@@ -268,13 +271,24 @@ func (s *Store) InstalledRelease(candidate, version string) (catalog.Release, er
 	return installed.Release, nil
 }
 
-func (s *Store) obtainArchive(ctx context.Context, r catalog.Release, progress io.Writer) (string, error) {
-	if archive, ok := s.validCachedArchive(r); ok {
+func (s *Store) obtainArchive(ctx context.Context, r catalog.Release, staging string, progress io.Writer) (string, error) {
+	cacheLock, err := s.acquireLock(ctx, "cache")
+	if err != nil {
+		return "", err
+	}
+	archive, cached := s.validCachedArchive(r)
+	if cached {
+		err := copyPath(archive, staging)
+		cacheLock.release()
+		if err != nil {
+			return "", err
+		}
 		if progress != nil {
 			fmt.Fprintln(progress, "使用本地下载缓存")
 		}
-		return archive, nil
+		return staging, nil
 	}
+	cacheLock.release()
 	archive, _, ok := s.archivePaths(r.Candidate, r.Version)
 	if !ok {
 		return "", errors.New("无效 candidate 或版本")
@@ -282,7 +296,11 @@ func (s *Store) obtainArchive(ctx context.Context, r catalog.Release, progress i
 	if err := os.MkdirAll(filepath.Dir(archive), 0o755); err != nil {
 		return "", err
 	}
-	tmpPath := archive + ".partial"
+	partialDir := filepath.Join(s.Root, "partials", "downloads", r.Candidate, r.Version)
+	if err := os.MkdirAll(partialDir, 0o755); err != nil {
+		return "", err
+	}
+	tmpPath := filepath.Join(partialDir, "archive.partial")
 	sum, err := s.download(ctx, r.URL, tmpPath, progress)
 	if err != nil {
 		return "", err
@@ -293,6 +311,14 @@ func (s *Store) obtainArchive(ctx context.Context, r catalog.Release, progress i
 			return "", err
 		}
 	}
+	cacheLock, err = s.acquireLock(ctx, "cache")
+	if err != nil {
+		return "", err
+	}
+	defer cacheLock.release()
+	if err := os.MkdirAll(filepath.Dir(archive), 0o755); err != nil {
+		return "", err
+	}
 	if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
@@ -302,7 +328,29 @@ func (s *Store) obtainArchive(ctx context.Context, r catalog.Release, progress i
 	if err := s.saveArchiveMetadata(r, sum); err != nil {
 		return "", err
 	}
-	return archive, nil
+	if err := copyPath(archive, staging); err != nil {
+		return "", err
+	}
+	_ = os.RemoveAll(partialDir)
+	return staging, nil
+}
+
+func copyPath(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func (s *Store) download(ctx context.Context, rawURL, path string, progress io.Writer) (string, error) {
@@ -344,6 +392,8 @@ func (e *downloadStatusError) Error() string {
 	return fmt.Sprintf("下载失败: HTTP %s", e.status)
 }
 
+func (e *downloadStatusError) Unwrap() error { return ErrNetwork }
+
 func retryableDownload(err error) bool {
 	var status *downloadStatusError
 	if errors.As(err, &status) {
@@ -373,7 +423,7 @@ func (s *Store) downloadAttempt(ctx context.Context, rawURL, path string, progre
 	}
 	resp, err := s.HTTP.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %v", ErrNetwork, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -417,7 +467,7 @@ func (s *Store) downloadAttempt(ctx context.Context, rawURL, path string, progre
 		if total >= 0 {
 			total += offset
 		}
-		reader = &progressReader{r: activity, total: total, n: offset, out: progress}
+		reader = &progressReader{r: activity, total: total, n: offset, out: progress, started: time.Now()}
 	}
 	stalled := make(chan struct{}, 1)
 	done := make(chan struct{})
@@ -428,11 +478,11 @@ func (s *Store) downloadAttempt(ctx context.Context, rawURL, path string, progre
 	close(done)
 	select {
 	case <-stalled:
-		return "", errors.New("无下载进度，已取消")
+		return "", fmt.Errorf("%w: 无下载进度，已取消", ErrNetwork)
 	default:
 	}
 	if copyErr != nil {
-		return "", copyErr
+		return "", fmt.Errorf("%w: %v", ErrNetwork, copyErr)
 	}
 	if progress != nil {
 		fmt.Fprintln(progress)
@@ -476,40 +526,79 @@ func watchDownloadProgress(reader *activityReader, timeout time.Duration, cancel
 }
 
 type progressReader struct {
-	r     io.Reader
-	total int64
-	n     int64
-	out   io.Writer
-	last  int
+	r       io.Reader
+	total   int64
+	n       int64
+	out     io.Writer
+	last    int
+	started time.Time
 }
 
 func (p *progressReader) Read(b []byte) (int, error) {
 	n, err := p.r.Read(b)
 	p.n += int64(n)
+	elapsed := time.Since(p.started).Seconds()
+	rate := float64(p.n) / (1 << 20)
+	if elapsed > 0 {
+		rate /= elapsed
+	}
 	if p.total > 0 {
 		pct := int(p.n * 100 / p.total)
 		if pct >= p.last+2 || pct == 100 {
-			fmt.Fprintf(p.out, "\r下载 %3d%%", pct)
+			fmt.Fprintf(p.out, "\r下载 %3d%% %.1f MiB/s", pct, rate)
 			p.last = pct
 		}
 	} else if p.n/(10<<20) > int64(p.last) {
 		p.last = int(p.n / (10 << 20))
-		fmt.Fprintf(p.out, "\r下载 %d MiB", p.n>>20)
+		fmt.Fprintf(p.out, "\r下载 %d MiB %.1f MiB/s", p.n>>20, rate)
 	}
 	return n, err
 }
 
 func (s *Store) verifyChecksum(ctx context.Context, rawURL, got string) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	attempts := s.RetryMax
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		lastErr = s.verifyChecksumAttempt(ctx, rawURL, got)
+		if lastErr == nil || !errors.Is(lastErr, ErrNetwork) {
+			return lastErr
+		}
+		if attempt+1 < attempts {
+			timer := time.NewTimer(s.RetryBase << attempt)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return fmt.Errorf("%w: %v", ErrNetwork, ctx.Err())
+			case <-timer.C:
+			}
+		}
+	}
+	return lastErr
+}
+
+func (s *Store) verifyChecksumAttempt(ctx context.Context, rawURL, got string) error {
+	requestCtx := ctx
+	cancel := func() {}
+	if s.NoProgressTimeout > 0 {
+		requestCtx, cancel = context.WithTimeout(ctx, s.NoProgressTimeout)
+	}
+	defer cancel()
+	req, _ := http.NewRequestWithContext(requestCtx, http.MethodGet, rawURL, nil)
 	resp, err := s.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("读取校验和失败: %w", err)
+		return fmt.Errorf("%w: 读取校验和失败: %v", ErrNetwork, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("读取校验和失败: HTTP %s", resp.Status)
+		return fmt.Errorf("%w: 读取校验和失败: HTTP %s", ErrNetwork, resp.Status)
 	}
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return fmt.Errorf("%w: 读取校验和失败: %v", ErrNetwork, err)
+	}
 	expected := strings.Fields(string(b))
 	if len(expected) == 0 || len(expected[0]) != 64 {
 		return fmt.Errorf("%w: 镜像返回无效 SHA-256", ErrIntegrity)

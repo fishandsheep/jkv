@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/fishandsheep/jkv/internal/catalog"
 	"github.com/fishandsheep/jkv/internal/store"
@@ -38,6 +40,10 @@ const (
 func exitCodeFor(err error) int {
 	message := err.Error()
 	switch {
+	case errors.Is(err, store.ErrIntegrity):
+		return exitIntegrity
+	case errors.Is(err, store.ErrNetwork), errors.Is(err, catalog.ErrNetwork):
+		return exitNetwork
 	case strings.HasPrefix(message, "用法:"),
 		strings.HasPrefix(message, "未知命令"),
 		strings.HasPrefix(message, "不支持选项"),
@@ -168,7 +174,7 @@ func usage() {
   jkv env|e [init|apply|clear]          项目 .jkvrc 环境
   jkv init|in <bash|zsh|fish|powershell> 输出 shell hook 和补全
   jkv mirror|m <maven|gradle|status>    配置国内依赖镜像
-  jkv clean|cl [downloads|catalog]      清理本地缓存
+  jkv clean|cl [downloads|catalog|partials] 清理本地缓存
   jkv doctor                            检查本机配置与运行环境
   jkv version|v                         显示版本
   jkv help                              显示帮助
@@ -198,9 +204,9 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 		if optionsFromContext(ctx).JSON {
 			return writeJSON(catalog.Candidates)
 		}
-		fmt.Printf("%-12s %-36s %-22s %s\n", "CANDIDATE", "说明", "国内源", "平台")
+		fmt.Printf("%s %s %s %s\n", padRight("CANDIDATE", 12), padRight("说明", 36), padRight("国内源", 22), "平台")
 		for _, c := range catalog.Candidates {
-			fmt.Printf("%-12s %-36s %-22s %s\n", c.Name, c.Description, c.Source, c.Platforms)
+			fmt.Printf("%s %s %s %s\n", padRight(c.Name, 12), padRight(c.Description, 36), padRight(c.Source, 22), c.Platforms)
 		}
 		return nil
 	}
@@ -248,8 +254,8 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 			fmt.Println()
 		}
 		fmt.Println(vendorDisplay(group.vendor))
-		fmt.Println(strings.Repeat("-", 78))
-		fmt.Printf("%-32s %-11s %-10s %s\n", "VERSION", "STATUS", "AVAILABLE", "SOURCE")
+		fmt.Println(strings.Repeat("-", 100))
+		fmt.Printf("%-32s %-11s %-8s %-11s %-10s %s\n", "VERSION", "STATUS", "TIER", "INTEGRITY", "AVAILABLE", "SOURCE")
 		for _, r := range group.releases {
 			status := ""
 			if installedSet[r.Version] {
@@ -265,7 +271,8 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 			if r.Available {
 				available = "√"
 			}
-			fmt.Printf("%-32s %-11s %-10s %s\n", r.Version, status, available, hostOf(r.URL))
+			fmt.Printf("%-32s %-11s %-8s %-11s %-10s %s\n",
+				r.Version, status, r.SupportTier, r.IntegrityLevel, available, hostOf(r.URL))
 		}
 	}
 	return nil
@@ -330,12 +337,20 @@ func loadReleases(ctx context.Context, s *store.Store, candidate string, refresh
 		}
 		releases, err := client.List(ctx, candidate, platform)
 		if err != nil {
-			if !hasCache {
+			if len(releases) > 0 && !hasCache {
+				cached = store.CatalogCache{FetchedAt: now, Releases: releases}
+				hasCache = true
+				refreshFailed = true
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "部分 provider 刷新失败，使用可用结果: %v\n", err)
+				}
+			} else if !hasCache {
 				return nil, err
-			}
-			refreshFailed = true
-			if !quiet {
-				fmt.Fprintf(os.Stderr, "刷新失败，使用本地缓存: %v\n", err)
+			} else {
+				refreshFailed = true
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "刷新失败，使用本地缓存: %v\n", err)
+				}
 			}
 		} else {
 			cached = store.CatalogCache{FetchedAt: now, Releases: releases}
@@ -415,7 +430,7 @@ func cmdInstall(ctx context.Context, s *store.Store, args []string) error {
 	}
 	if !foundCached {
 		fmt.Fprintln(os.Stderr, "解析国内镜像版本...")
-		releases, loadErr := loadReleases(ctx, s, candidate, false, false, false)
+		releases, loadErr := loadReleases(ctx, s, candidate, false, true, false)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -432,7 +447,7 @@ func cmdInstall(ctx context.Context, s *store.Store, args []string) error {
 		fmt.Fprintf(os.Stderr, "安装 %s %s，来源 %s\n", candidate, r.Version, hostOf(r.URL))
 	}
 	var progress io.Writer = os.Stderr
-	if options.Quiet {
+	if options.Quiet || !isTerminal(os.Stderr) {
 		progress = nil
 	}
 	if err := s.InstallWithOptions(ctx, r, progress, store.InstallOptions{RequireChecksum: requireChecksum}); err != nil {
@@ -472,7 +487,7 @@ func cmdRepair(ctx context.Context, s *store.Store, args []string) error {
 		return err
 	}
 	var progress io.Writer = os.Stderr
-	if optionsFromContext(ctx).Quiet {
+	if optionsFromContext(ctx).Quiet || !isTerminal(os.Stderr) {
 		progress = nil
 	}
 	if err := s.InstallWithOptions(ctx, release, progress, store.InstallOptions{
@@ -486,6 +501,13 @@ func cmdRepair(ctx context.Context, s *store.Store, args []string) error {
 }
 
 func selectRelease(releases []catalog.Release, want string) (catalog.Release, error) {
+	available := make([]catalog.Release, 0, len(releases))
+	for _, release := range releases {
+		if !release.AvailabilityKnown || release.Available {
+			available = append(available, release)
+		}
+	}
+	releases = available
 	if len(releases) == 0 {
 		return catalog.Release{}, errors.New("当前平台无可用稳定版本")
 	}
@@ -697,26 +719,40 @@ func cmdHome(ctx context.Context, s *store.Store, args []string) error {
 }
 
 type doctorResult struct {
-	Root       string `json:"root"`
-	OS         string `json:"os"`
-	Arch       string `json:"arch"`
-	Writable   bool   `json:"writable"`
-	HTTPSProxy bool   `json:"https_proxy"`
-	HTTPProxy  bool   `json:"http_proxy"`
-	NoProxy    bool   `json:"no_proxy"`
+	Root       string               `json:"root"`
+	OS         string               `json:"os"`
+	Arch       string               `json:"arch"`
+	Writable   bool                 `json:"writable"`
+	HTTPSProxy bool                 `json:"https_proxy"`
+	HTTPProxy  bool                 `json:"http_proxy"`
+	NoProxy    bool                 `json:"no_proxy"`
+	Catalog    map[string]string    `json:"catalog"`
+	Installed  map[string]int       `json:"installed"`
+	Mirrors    []doctorMirrorResult `json:"mirrors"`
 }
+
+type doctorMirrorResult struct {
+	Name      string `json:"name"`
+	Host      string `json:"host"`
+	Reachable bool   `json:"reachable"`
+	Status    int    `json:"status,omitempty"`
+}
+
+var doctorHTTPClient = &http.Client{Timeout: 4 * time.Second}
 
 func cmdDoctor(ctx context.Context, s *store.Store, args []string) error {
 	if len(args) != 0 {
 		return errors.New("用法: jkv doctor")
 	}
 	result := doctorResult{
-		Root:       s.Root,
+		Root:       "<JKV_DIR>",
 		OS:         runtime.GOOS,
 		Arch:       runtime.GOARCH,
 		HTTPSProxy: os.Getenv("HTTPS_PROXY") != "" || os.Getenv("https_proxy") != "",
 		HTTPProxy:  os.Getenv("HTTP_PROXY") != "" || os.Getenv("http_proxy") != "",
 		NoProxy:    os.Getenv("NO_PROXY") != "" || os.Getenv("no_proxy") != "",
+		Catalog:    map[string]string{},
+		Installed:  map[string]int{},
 	}
 	if err := os.MkdirAll(s.Root, 0o755); err == nil {
 		if f, createErr := os.CreateTemp(s.Root, ".jkv-doctor-"); createErr == nil {
@@ -726,14 +762,78 @@ func cmdDoctor(ctx context.Context, s *store.Store, args []string) error {
 			_ = os.Remove(name)
 		}
 	}
+	platform := catalog.CurrentPlatform()
+	for _, candidate := range []string{"java", "maven", "gradle"} {
+		if cached, err := s.LoadCatalog(platform, candidate); err == nil && len(cached.Releases) > 0 {
+			result.Catalog[candidate] = fmt.Sprintf("cached:%d", len(cached.Releases))
+		} else {
+			result.Catalog[candidate] = "missing"
+		}
+		if versions, err := s.Installed(candidate); err == nil {
+			result.Installed[candidate] = len(versions)
+		}
+	}
+	endpoints := []struct {
+		name string
+		url  string
+	}{
+		{"temurin", "https://mirrors.tuna.tsinghua.edu.cn/Adoptium/"},
+		{"maven", "https://mirrors.aliyun.com/apache/maven/maven-3/"},
+		{"gradle", "https://mirrors.cloud.tencent.com/gradle/"},
+	}
+	type mirrorCheck struct {
+		index  int
+		result doctorMirrorResult
+	}
+	checks := make(chan mirrorCheck, len(endpoints))
+	for index, endpoint := range endpoints {
+		go func() {
+			checkCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(checkCtx, http.MethodHead, endpoint.url, nil)
+			result := doctorMirrorResult{Name: endpoint.name, Host: hostOf(endpoint.url)}
+			if err == nil {
+				resp, requestErr := doctorHTTPClient.Do(req)
+				if requestErr == nil {
+					result.Status = resp.StatusCode
+					result.Reachable = resp.StatusCode >= 200 && resp.StatusCode < 400
+					_ = resp.Body.Close()
+				}
+			}
+			checks <- mirrorCheck{index: index, result: result}
+		}()
+	}
+	result.Mirrors = make([]doctorMirrorResult, len(endpoints))
+	for range endpoints {
+		check := <-checks
+		result.Mirrors[check.index] = check.result
+	}
 	if optionsFromContext(ctx).JSON {
-		return writeJSON(result)
+		if err := writeJSON(result); err != nil {
+			return err
+		}
+		if !result.Writable {
+			return errors.New("JKV_DIR 不可写: <JKV_DIR>")
+		}
+		return nil
 	}
 	fmt.Printf("jkv doctor\n目录: %s\n平台: %s/%s\n可写: %t\n", result.Root, result.OS, result.Arch, result.Writable)
+	for _, mirror := range result.Mirrors {
+		fmt.Printf("镜像 %-8s %-38s 可达: %t", mirror.Name, mirror.Host, mirror.Reachable)
+		if mirror.Status != 0 {
+			fmt.Printf(" (HTTP %d)", mirror.Status)
+		}
+		fmt.Println()
+	}
 	if !result.Writable {
-		return fmt.Errorf("JKV_DIR 不可写: %s", result.Root)
+		return errors.New("JKV_DIR 不可写: <JKV_DIR>")
 	}
 	return nil
+}
+
+func isTerminal(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func cmdEnv(s *store.Store, args []string) error {
@@ -835,7 +935,7 @@ func printEnv(s *store.Store, versions map[string]string, shell string, includeB
 		case "fish":
 			fmt.Printf("set -gx %s %s\n", name, fishQuote(home))
 			fmt.Printf("set -gx %s %s\n", currentVar(candidate), fishQuote(version))
-			fmt.Printf("fish_add_path --prepend %s\n", fishQuote(filepath.Join(home, "bin")))
+			fmt.Printf("set -gx PATH %s $PATH\n", fishQuote(filepath.Join(home, "bin")))
 		default:
 			return fmt.Errorf("不支持 shell %q", shell)
 		}
@@ -845,7 +945,7 @@ func printEnv(s *store.Store, versions map[string]string, shell string, includeB
 		if shell == "powershell" || shell == "pwsh" {
 			fmt.Printf("$env:JKV_DIR = %s\n$env:Path = %s + [IO.Path]::PathSeparator + $env:Path\n", psQuote(s.Root), psQuote(bin))
 		} else if shell == "fish" {
-			fmt.Printf("set -gx JKV_DIR %s\nfish_add_path --prepend %s\n", fishQuote(s.Root), fishQuote(bin))
+			fmt.Printf("set -gx JKV_DIR %s\nset -gx PATH %s $PATH\n", fishQuote(s.Root), fishQuote(bin))
 		} else {
 			fmt.Printf("export JKV_DIR=%s\nexport PATH=%s:$PATH\n", shQuote(s.Root), shQuote(bin))
 		}
@@ -1029,23 +1129,42 @@ allprojects {
 
 func cmdClean(ctx context.Context, s *store.Store, args []string) error {
 	dryRun := false
+	var olderThan time.Duration
 	var positional []string
-	for _, arg := range args {
-		if arg == "--dry-run" {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--dry-run":
 			dryRun = true
-		} else {
+		case arg == "--older-than":
+			if index+1 >= len(args) {
+				return errors.New("--older-than 缺少时长")
+			}
+			index++
+			parsed, err := time.ParseDuration(args[index])
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("无效缓存年龄 %q", args[index])
+			}
+			olderThan = parsed
+		case strings.HasPrefix(arg, "--older-than="):
+			parsed, err := time.ParseDuration(strings.TrimPrefix(arg, "--older-than="))
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("无效缓存年龄 %q", strings.TrimPrefix(arg, "--older-than="))
+			}
+			olderThan = parsed
+		default:
 			positional = append(positional, arg)
 		}
 	}
 	args = positional
 	if len(args) > 3 {
-		return errors.New("用法: jkv clean [downloads [candidate [version]]|catalog [candidate]] [--dry-run]")
+		return errors.New("用法: jkv clean [downloads|catalog|partials] [candidate] [version] [--dry-run] [--older-than 24h]")
 	}
 	kind, candidate, version := "", "", ""
 	if len(args) > 0 {
 		kind = args[0]
 	}
-	if kind != "" && kind != "downloads" && kind != "catalog" {
+	if kind != "" && kind != "downloads" && kind != "catalog" && kind != "partials" {
 		return fmt.Errorf("不支持缓存类型 %q", kind)
 	}
 	if len(args) > 1 {
@@ -1055,15 +1174,26 @@ func cmdClean(ctx context.Context, s *store.Store, args []string) error {
 		}
 	}
 	if len(args) > 2 {
-		if kind != "downloads" {
-			return errors.New("catalog 清理不支持 version 参数")
+		if kind != "downloads" && kind != "partials" {
+			return errors.New("此缓存类型不支持 version 参数")
 		}
 		version = args[2]
 	}
+	if kind == "partials" && olderThan <= 0 {
+		return errors.New("清理中断下载必须指定 --older-than")
+	}
 	var result store.CleanResult
 	var err error
-	if dryRun {
+	if kind == "partials" && dryRun {
+		result, err = s.InspectPartialsOlderThan(candidate, version, olderThan)
+	} else if kind == "partials" {
+		result, err = s.CleanPartialsOlderThan(candidate, version, olderThan)
+	} else if dryRun && olderThan > 0 {
+		result, err = s.InspectCacheOlderThan(kind, candidate, version, olderThan)
+	} else if dryRun {
 		result, err = s.InspectCache(kind, candidate, version)
+	} else if olderThan > 0 {
+		result, err = s.CleanCacheOlderThan(kind, candidate, version, olderThan)
 	} else {
 		result, err = s.CleanCache(kind, candidate, version)
 	}
@@ -1071,7 +1201,7 @@ func cmdClean(ctx context.Context, s *store.Store, args []string) error {
 		return err
 	}
 	if optionsFromContext(ctx).JSON {
-		return writeJSON(map[string]any{"dry_run": dryRun, "files": result.Files, "bytes": result.Bytes})
+		return writeJSON(map[string]any{"dry_run": dryRun, "older_than": olderThan.String(), "files": result.Files, "bytes": result.Bytes})
 	}
 	if dryRun {
 		fmt.Printf("将清理 %d 个文件，释放 %s\n", result.Files, formatBytes(result.Bytes))
@@ -1095,6 +1225,30 @@ func formatBytes(n int64) string {
 		}
 	}
 	return fmt.Sprintf("%d B", n)
+}
+
+func padRight(value string, width int) string {
+	display := 0
+	for _, r := range value {
+		switch {
+		case unicode.Is(unicode.Mn, r):
+		case r >= 0x1100 && (r <= 0x115f || r == 0x2329 || r == 0x232a ||
+			r >= 0x2e80 && r <= 0xa4cf && r != 0x303f ||
+			r >= 0xac00 && r <= 0xd7a3 ||
+			r >= 0xf900 && r <= 0xfaff ||
+			r >= 0xfe10 && r <= 0xfe19 ||
+			r >= 0xfe30 && r <= 0xfe6f ||
+			r >= 0xff00 && r <= 0xff60 ||
+			r >= 0xffe0 && r <= 0xffe6):
+			display += 2
+		default:
+			display++
+		}
+	}
+	if display >= width {
+		return value
+	}
+	return value + strings.Repeat(" ", width-display)
 }
 
 func writeConfig(path, content string) error {

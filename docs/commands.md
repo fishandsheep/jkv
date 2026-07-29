@@ -34,8 +34,12 @@ jkv home <candidate> [version]
 jkv env [init|apply|clear]
 jkv init <bash|zsh|fish|powershell>
 jkv mirror <maven|gradle|status> [--apply]
-jkv clean [downloads|catalog] [candidate] [version] [--dry-run]
+jkv clean [downloads|catalog|partials] [candidate] [version] [--dry-run] [--older-than 720h]
 jkv doctor
 ```
 
 `JKV_REQUIRE_CHECKSUM=1` 等价于安装时使用 `--require-checksum`。上游未提供校验和时，默认明确警告；严格模式拒绝安装。
+
+中断下载位于可识别的 `$JKV_DIR/partials/downloads`。只能用带年龄门槛的 `jkv clean partials --older-than 24h` 清理；清理会等待对应安装锁，避免删除仍在使用的断点文件。
+
+`list --json` 的每个版本包含 `support_tier`、`integrity_level`、`installed`、`default`、`current`。`integrity_level` 当前为 `checksum` 或 `https-only`；前者表示 provider 提供同源 SHA-256，后者表示只能依赖 HTTPS 传输保护。
