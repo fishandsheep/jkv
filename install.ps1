@@ -15,6 +15,18 @@ if ($env:JKV_UNINSTALL -eq '1') { $Uninstall = $true }
 if ($env:JKV_PURGE -eq '1') { $Uninstall = $true; $Purge = $true }
 if ($env:JKV_ASSUME_YES -eq '1') { $Yes = $true }
 
+function Remove-JkvTrailingDirectorySeparator {
+  param([string]$Path)
+
+  $root = [IO.Path]::GetPathRoot($Path)
+  while ($Path.Length -gt $root.Length -and
+      ($Path.EndsWith([IO.Path]::DirectorySeparatorChar.ToString()) -or
+       $Path.EndsWith([IO.Path]::AltDirectorySeparatorChar.ToString()))) {
+    $Path = $Path.Substring(0, $Path.Length - 1)
+  }
+  return $Path
+}
+
 function Remove-JkvProfileBlock {
   if (-not (Test-Path $PROFILE)) { return }
   $text = Get-Content $PROFILE -Raw
@@ -32,14 +44,14 @@ function Remove-JkvProfileBlock {
 }
 
 $fullInstallDir = [IO.Path]::GetFullPath($InstallDir)
-$fullInstallDir = [IO.Path]::TrimEndingDirectorySeparator($fullInstallDir)
+$fullInstallDir = Remove-JkvTrailingDirectorySeparator $fullInstallDir
 $binDir = Join-Path $fullInstallDir 'bin'
 $target = Join-Path $binDir 'jkv.exe'
 
 if ($Uninstall) {
   if ($Purge) {
-    $homePath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($HOME))
-    $rootPath = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetPathRoot($fullInstallDir))
+    $homePath = Remove-JkvTrailingDirectorySeparator ([IO.Path]::GetFullPath($HOME))
+    $rootPath = Remove-JkvTrailingDirectorySeparator ([IO.Path]::GetPathRoot($fullInstallDir))
     $sameAsHome = [StringComparer]::OrdinalIgnoreCase.Equals($fullInstallDir, $homePath)
     $sameAsRoot = [StringComparer]::OrdinalIgnoreCase.Equals($fullInstallDir, $rootPath)
     $separator = [IO.Path]::DirectorySeparatorChar
