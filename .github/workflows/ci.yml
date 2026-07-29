@@ -262,6 +262,22 @@ jobs:
           if (-not (Select-String -Path $PROFILE -SimpleMatch '# >>> jkv managed >>>' -Quiet)) {
             throw 'PowerShell profile missing jkv managed block'
           }
+      - name: Verify Windows PowerShell 5.1 installer
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          $env:JKV_DIR = Join-Path $env:RUNNER_TEMP 'jkv-windows-powershell-install'
+          $env:JKV_MODIFY_PROFILE = '0'
+          $env:JKV_UNINSTALL = '1'
+          try {
+            Invoke-Expression (Get-Content .\install.ps1 -Raw)
+          } finally {
+            Remove-Item Env:JKV_DIR -ErrorAction SilentlyContinue
+            Remove-Item Env:JKV_MODIFY_PROFILE -ErrorAction SilentlyContinue
+            Remove-Item Env:JKV_UNINSTALL -ErrorAction SilentlyContinue
+          }
       - name: Run PowerShell binary installer
         shell: pwsh
         run: |
