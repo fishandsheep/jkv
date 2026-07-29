@@ -5,12 +5,13 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
         include:
           - { os: linux, arch: amd64, ext: '' }
@@ -20,19 +21,99 @@ jobs:
           - { os: windows, arch: amd64, ext: '.exe' }
           - { os: windows, arch: arm64, ext: '.exe' }
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with: { go-version-file: go.mod }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.5
+          cache: false
       - name: Build
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: '0'
         run: |
-          name="jkv-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
-          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "$name" ./cmd/jkv
-          sha256sum "$name" > "$name.sha256"
-      - uses: softprops/action-gh-release@v2
+          mkdir -p dist
+          name="jkv-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/$name" ./cmd/jkv
+          (cd dist && sha256sum "$name" > "$name.sha256")
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          files: |
-            jkv-*
+          file: dist/jkv-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+          format: spdx-json
+          output-file: dist/jkv-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  installers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Stamp domestic download base
+        env:
+          CN_DOWNLOAD_BASE: ${{ vars.JKV_CN_DOWNLOAD_BASE }}
+        run: |
+          if [ -z "$CN_DOWNLOAD_BASE" ]; then
+            echo 'repository variable JKV_CN_DOWNLOAD_BASE is required' >&2
+            exit 1
+          fi
+          mkdir -p dist
+          cp install.sh install.ps1 dist/
+          stamped="${CN_DOWNLOAD_BASE%/}/${GITHUB_REF_NAME}"
+          sed -i "s|__JKV_CN_DOWNLOAD_BASE__|$stamped|g" dist/install.sh dist/install.ps1
+          (cd dist && sha256sum install.sh > install.sh.sha256)
+          (cd dist && sha256sum install.ps1 > install.ps1.sha256)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-installers
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: [build, installers]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Attest release assets
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-path: dist/*
+      - name: Upload to domestic object storage
+        if: ${{ vars.JKV_CN_S3_URI != '' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.JKV_CN_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.JKV_CN_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.JKV_CN_S3_REGION }}
+          CN_S3_URI: ${{ vars.JKV_CN_S3_URI }}
+          CN_S3_ENDPOINT: ${{ vars.JKV_CN_S3_ENDPOINT }}
+        run: |
+          target="${CN_S3_URI%/}/${GITHUB_REF_NAME}/"
+          if [ -n "$CN_S3_ENDPOINT" ]; then
+            aws s3 cp dist/ "$target" --recursive --endpoint-url "$CN_S3_ENDPOINT"
+          else
+            aws s3 cp dist/ "$target" --recursive
+          fi
+      - name: Create GitHub fallback release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${flags[@]}"

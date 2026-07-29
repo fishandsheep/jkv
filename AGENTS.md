@@ -31,3 +31,17 @@ History follows Conventional Commit-style subjects such as `feat: add ...` and `
 ## Security & Configuration Tips
 
 Test installation changes with a temporary `JKV_DIR`. Preserve SHA-256 verification where upstream checksums exist, archive path-traversal defenses, HTTPS sources, and no-overwrite behavior for existing Maven or Gradle configuration.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live in GitHub Issues for `fishandsheep/jkv`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage roles with their default label names. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use the single-context domain documentation layout. See `docs/agents/domain.md`.

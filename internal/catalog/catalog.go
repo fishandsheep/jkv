@@ -24,31 +24,33 @@ type Platform struct {
 }
 
 type Release struct {
-	Candidate         string
-	Version           string
-	Vendor            string
-	URL               string
-	ChecksumURL       string
-	Available         bool
-	AvailabilityKnown bool
+	Candidate         string `json:"candidate"`
+	Version           string `json:"version"`
+	Vendor            string `json:"vendor,omitempty"`
+	SupportTier       string `json:"support_tier"`
+	URL               string `json:"url"`
+	ChecksumURL       string `json:"checksum_url,omitempty"`
+	Available         bool   `json:"available"`
+	AvailabilityKnown bool   `json:"availability_known"`
 }
 
 type Candidate struct {
-	Name        string
-	Description string
-	Source      string
-	Platforms   string
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Source      string `json:"source"`
+	Platforms   string `json:"platforms"`
+	SupportTier string `json:"support_tier"`
 }
 
 var Candidates = []Candidate{
-	{"java", "JDK：Temurin、Alibaba Dragonwell、Huawei BiSheng", "清华 / 阿里 OSS / 华为云", "按发行商"},
-	{"maven", "Apache Maven", "阿里云 Apache 镜像", "全平台"},
-	{"gradle", "Gradle", "腾讯云镜像", "全平台"},
-	{"ant", "Apache Ant", "阿里云 Apache 镜像", "全平台"},
-	{"groovy", "Apache Groovy", "阿里云 Apache 镜像", "全平台"},
-	{"jmeter", "Apache JMeter", "阿里云 Apache 镜像", "全平台"},
-	{"tomcat", "Apache Tomcat", "阿里云 Apache 镜像", "全平台"},
-	{"springboot", "Spring Boot CLI", "阿里云 Maven 仓库", "全平台"},
+	{"java", "JDK：Temurin、Alibaba Dragonwell、Huawei BiSheng", "清华 / 阿里 OSS / 华为云", "按发行商", "core"},
+	{"maven", "Apache Maven", "阿里云 Apache 镜像", "全平台", "core"},
+	{"gradle", "Gradle", "腾讯云镜像", "全平台", "core"},
+	{"ant", "Apache Ant", "阿里云 Apache 镜像", "全平台", "beta"},
+	{"groovy", "Apache Groovy", "阿里云 Apache 镜像", "全平台", "beta"},
+	{"jmeter", "Apache JMeter", "阿里云 Apache 镜像", "全平台", "beta"},
+	{"tomcat", "Apache Tomcat", "阿里云 Apache 镜像", "全平台", "beta"},
+	{"springboot", "Spring Boot CLI", "阿里云 Maven 仓库", "全平台", "beta"},
 }
 
 var candidateNames = func() map[string]bool {
@@ -64,7 +66,10 @@ type Client struct {
 }
 
 func NewClient() *Client {
-	return &Client{HTTP: &http.Client{Timeout: 30 * time.Second}}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	return &Client{HTTP: &http.Client{Transport: transport}}
 }
 
 func CurrentPlatform() Platform {
@@ -106,7 +111,17 @@ func (c *Client) List(ctx context.Context, candidate string, p Platform) ([]Rele
 	if err != nil {
 		return nil, err
 	}
+	for i := range releases {
+		releases[i].SupportTier = supportTier(candidate, releases[i].Vendor)
+	}
 	return uniqueSorted(releases, 40), nil
+}
+
+func supportTier(candidate, vendor string) string {
+	if candidate == "maven" || candidate == "gradle" || (candidate == "java" && vendor == "temurin") {
+		return "core"
+	}
+	return "beta"
 }
 
 func (c *Client) get(ctx context.Context, rawURL string) ([]byte, error) {

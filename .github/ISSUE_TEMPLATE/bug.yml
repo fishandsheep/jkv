@@ -1,0 +1,27 @@
+name: 缺陷报告
+description: 报告可复现的 jkv 问题
+title: "bug: "
+labels: ["needs-triage"]
+body:
+  - type: textarea
+    attributes:
+      label: 问题与复现步骤
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 环境
+      description: 请附 jkv version、jkv doctor --json、系统和架构。
+    validations:
+      required: true
+  - type: checkboxes
+    attributes:
+      label: 安全确认
+      options:
+        - label: 这不是安全漏洞；安全漏洞将按 SECURITY.md 私密报告。
+          required: true

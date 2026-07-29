@@ -4,16 +4,19 @@
 
 面向国内网络的 JVM 工具版本管理器。思路接近 SDKMAN：在线列版本、下载解压、保存多版本、按终端或项目切换；区别是只接入可脚本化的国内稳定源，并原生支持 Linux、macOS、Windows。
 
+> v0.2 当前为 beta。Temurin、Maven、Gradle 属于 core 支持；其他 provider 属于 beta。参见[支持政策](docs/support.md)。
+
+[English](README.en.md) · [命令参考](docs/commands.md) · [故障排查](docs/troubleshooting.md) · [安全政策](SECURITY.md)
+
 ## 当前支持
 
-| Candidate | 国内下载源 | Linux | macOS | Windows |
-|---|---|---:|---:|---:|
-| Java / Eclipse Temurin | 清华 TUNA Adoptium | x64/arm64 | x64/arm64 | x64；arm64 视镜像文件 |
-| Java / Alibaba Dragonwell | 阿里云 OSS 官方源 | x64/arm64 | — | x64 |
-| Java / Huawei BiSheng | 华为云鲲鹏归档 | x64/arm64 | — | — |
-| Gradle | 腾讯云 Gradle 镜像 | ✓ | ✓ | ✓ |
-| Maven、Ant、Groovy、JMeter、Tomcat | 阿里云 Apache 镜像 | ✓ | ✓ | ✓ |
-| Spring Boot CLI | 阿里云 Maven 公共仓库 | ✓ | ✓ | ✓ |
+| Candidate | 等级 | 国内下载源 | Linux | macOS | Windows |
+|---|---|---|---:|---:|---:|
+| Java / Eclipse Temurin | core | 清华 TUNA Adoptium | x64/arm64 | x64/arm64 | x64；arm64 视镜像文件 |
+| Maven | core | 阿里云 Apache 镜像 | ✓ | ✓ | ✓ |
+| Gradle | core | 腾讯云 Gradle 镜像 | ✓ | ✓ | ✓ |
+| Java / Dragonwell、BiSheng | beta | 阿里 OSS / 华为云 | 见版本 | — | 见版本 |
+| Ant、Groovy、JMeter、Tomcat、Spring Boot CLI | beta | 阿里云镜像 | ✓ | ✓ | ✓ |
 
 版本从镜像目录或官方元数据实时发现，不在客户端写死。Dragonwell 官方元数据偶发不可用时，客户端回退到内置的最近已知官方 OSS 坐标。
 
@@ -22,23 +25,25 @@
 Linux / macOS：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fishandsheep/jkv/main/install.sh | sh
+curl -fsSL <国内安装脚本地址>/install.sh | sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm https://raw.githubusercontent.com/fishandsheep/jkv/main/install.ps1 | iex
+irm <国内安装脚本地址>/install.ps1 | iex
 ```
 
-安装器自动识别 Linux、macOS、Windows 及 amd64、arm64，从 GitHub Releases 下载原生二进制并校验 SHA-256。默认安装到 `~/.jkv`，无需 Go 或管理员权限。重新打开终端后验证：
+正式发布页会给出已配置的国内安装脚本地址。安装器优先从国内对象存储下载 jkv 本身；仅在传输失败或校验文件不可用时回退 GitHub。JDK、Maven、Gradle 等工具介质始终来自各自公共官方国内镜像。每个 jkv 二进制都强制校验 SHA-256；校验不匹配不会切换来源。
+
+默认安装到 `~/.jkv`，无需 Go 或管理员权限。重新打开终端后验证：
 
 ```sh
 jkv version
 jkv list
 ```
 
-可用 `JKV_DIR` 修改安装目录，`JKV_REPO` 改用其他 GitHub fork，或用 `JKV_DOWNLOAD_BASE` 指向包含二进制及 `.sha256` 文件的镜像目录。Tag `v*` 会由 GitHub Actions 构建六个平台产物。
+可用 `JKV_DIR` 修改安装目录，`JKV_DOWNLOAD_BASE` 指定首选 jkv 制品目录，`JKV_FALLBACK_BASE` 指定后备目录。`--no-modify-profile` 不修改 shell 配置；`--uninstall` 只移除 jkv 与托管配置，保留已安装工具；`--purge --yes` 才彻底删除数据。
 
 不运行安装器时，手工加载环境：
 
@@ -46,6 +51,14 @@ jkv list
 export JKV_DIR="$HOME/.jkv"
 export PATH="$JKV_DIR/bin:$PATH"
 eval "$(jkv init bash)" # zsh 用户改为 zsh
+```
+
+Fish：
+
+```fish
+set -gx JKV_DIR "$HOME/.jkv"
+fish_add_path "$JKV_DIR/bin"
+jkv init fish | source
 ```
 
 ```powershell
@@ -71,6 +84,8 @@ jkv default java 21-tem          # 新终端默认；简写: jkv d
 jkv current                      # 简写: jkv c
 jkv home java
 jkv uninstall java 17-dragonwell
+jkv repair java 21.0.11+10-tem
+jkv doctor
 ```
 
 无版本参数时安装最新稳定版。Java 默认优先 Temurin；可用 `21-tem`、`17-dragonwell`、`21-bisheng` 选择某个大版本最新构建。
@@ -104,6 +119,10 @@ jkv mirror status
 
 已有 Maven/Gradle 配置绝不覆盖。企业项目若依赖私服或 `repositoriesMode`，应手工合并，不建议全局强制镜像。
 
+## 隐私与网络
+
+jkv 不含遥测、账号、广告或后台常驻进程。网络请求仅用于用户触发的版本发现、可用性检查和下载；定时 provider 健康检查只在项目 CI 内运行。客户端尊重系统代理和系统 CA，不提供关闭 TLS 校验的开关。
+
 ## 选源原则
 
 详见 [docs/sources.md](docs/sources.md)。核心标准：国内主体长期维护、HTTPS、无需登录、目录或元数据可机器读取、当前仍同步稳定版。只有 GitHub Release、网盘、博客转存、需人工点击或版本长期滞后的生态暂不支持。
@@ -117,6 +136,8 @@ go test ./...
 go run ./cmd/jkv list java
 go build ./cmd/jkv
 ```
+
+正式发布流程、供应链产物和回滚步骤见 [docs/release.md](docs/release.md)。独立模板/catalog 仓库的分阶段方案见 [docs/catalog-roadmap.md](docs/catalog-roadmap.md)；v0.2 不从远端 catalog 执行任何代码。
 
 从源码目录安装（需要 Go）：
 

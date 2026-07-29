@@ -1,0 +1,25 @@
+name: Provider 或 candidate 提议
+description: 提议新的公共官方国内工具源
+title: "provider: "
+labels: ["needs-triage"]
+body:
+  - type: input
+    attributes:
+      label: 工具与上游项目
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: 国内 HTTPS 制品源
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 维护主体、版本发现和平台覆盖
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 校验和或签名来源
+    validations:
+      required: true

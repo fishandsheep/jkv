@@ -1,10 +1,15 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"jkv/internal/catalog"
-	"jkv/internal/store"
+	"github.com/fishandsheep/jkv/internal/catalog"
+	"github.com/fishandsheep/jkv/internal/store"
 )
 
 func TestSelectReleaseAlias(t *testing.T) {
@@ -184,9 +189,9 @@ func TestCompletionCoversEveryTopLevelNameAndStaticArgument(t *testing.T) {
 		want     []string
 	}{
 		{[]string{"env", "e"}, []string{"apply", "clear", "defaults", "init"}},
-		{[]string{"init", "in"}, []string{"bash", "powershell", "pwsh", "zsh"}},
+		{[]string{"init", "in"}, []string{"bash", "fish", "powershell", "pwsh", "zsh"}},
 		{[]string{"mirror", "m"}, []string{"gradle", "maven", "status"}},
-		{[]string{"clean", "cl"}, []string{"catalog", "downloads"}},
+		{[]string{"clean", "cl"}, []string{"--dry-run", "catalog", "downloads"}},
 	}
 	for _, test := range tests {
 		for _, command := range test.commands {
@@ -271,6 +276,7 @@ func TestShellInitHint(t *testing.T) {
 	tests := map[string]string{
 		"bash":       `eval "$(jkv init bash)"`,
 		"zsh":        `eval "$(jkv init zsh)"`,
+		"fish":       `jkv init fish | source`,
 		"powershell": `Invoke-Expression ((jkv init powershell) -join [Environment]::NewLine)`,
 		"pwsh":       `Invoke-Expression ((jkv init powershell) -join [Environment]::NewLine)`,
 	}
@@ -279,4 +285,351 @@ func TestShellInitHint(t *testing.T) {
 			t.Errorf("shellInitHint(%q) = %q, want %q", shell, got, want)
 		}
 	}
+}
+
+func TestInitFishEmitsFunctionAndCompletion(t *testing.T) {
+	script := captureStdout(t, func() error { return cmdInit([]string{"fish"}) })
+	for _, want := range []string{
+		"function jkv",
+		"command jkv __complete",
+		"complete --command jkv",
+		"command jkv env --shell fish | source",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("fish init missing %q", want)
+		}
+	}
+}
+
+func TestRunCurrentJSON(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("JKV_DIR", root)
+	s := store.New(root)
+	if err := os.MkdirAll(s.CandidateDir("java", "21.0.1-tem"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDefault("java", "21.0.1-tem"); err != nil {
+		t.Fatal(err)
+	}
+
+	output := captureStdout(t, func() error {
+		return run(context.Background(), []string{"--json", "current", "java"})
+	})
+	var got map[string]string
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("JSON output = %q: %v", output, err)
+	}
+	if got["candidate"] != "java" || got["version"] != "21.0.1-tem" {
+		t.Fatalf("current JSON = %#v", got)
+	}
+}
+
+func TestReadEnvFileRejectsPathSegments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".jkvrc")
+	if err := os.WriteFile(path, []byte("java=../../../tmp/tool\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readEnvFile(path); err == nil {
+		t.Fatal("expected path-like version to be rejected")
+	}
+}
+
+func TestRunListCandidatesJSON(t *testing.T) {
+	output := captureStdout(t, func() error {
+		return run(context.Background(), []string{"list", "--json"})
+	})
+	var got []map[string]any
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("JSON output = %q: %v", output, err)
+	}
+	if len(got) == 0 || got[0]["name"] != "java" {
+		t.Fatalf("candidate JSON = %#v", got)
+	}
+}
+
+func TestRunHomeJSON(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("JKV_DIR", root)
+	s := store.New(root)
+	version := "3.9.11"
+	if err := os.MkdirAll(s.CandidateDir("maven", version), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDefault("maven", version); err != nil {
+		t.Fatal(err)
+	}
+
+	output := captureStdout(t, func() error {
+		return run(context.Background(), []string{"home", "maven", "--json"})
+	})
+	var got map[string]string
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["candidate"] != "maven" || got["version"] != version || got["home"] != s.CandidateDir("maven", version) {
+		t.Fatalf("home JSON = %#v", got)
+	}
+}
+
+func TestRunDoctorJSON(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("JKV_DIR", root)
+	output := captureStdout(t, func() error {
+		return run(context.Background(), []string{"doctor", "--json"})
+	})
+	var got map[string]any
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("doctor JSON = %q: %v", output, err)
+	}
+	if got["root"] != root || got["os"] == "" || got["arch"] == "" || got["writable"] != true {
+		t.Fatalf("doctor = %#v", got)
+	}
+}
+
+func TestExitCodeCategories(t *testing.T) {
+	tests := []struct {
+		err  error
+		want int
+	}{
+		{errors.New("用法: jkv install <candidate>"), 2},
+		{errors.New("未安装 java 21"), 3},
+		{errors.New("下载失败: HTTP 503 Service Unavailable"), 4},
+		{errors.New("SHA-256 不匹配"), 5},
+		{errors.New("已安装 java 21"), 6},
+	}
+	for _, test := range tests {
+		if got := exitCodeFor(test.err); got != test.want {
+			t.Errorf("exitCodeFor(%q) = %d, want %d", test.err, got, test.want)
+		}
+	}
+}
+
+func TestInstalledCommandWorkflow(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("JKV_DIR", root)
+	s := store.New(root)
+	for candidate, version := range map[string]string{"java": "21.0.1-tem", "maven": "3.9.11"} {
+		if err := os.MkdirAll(filepath.Join(s.CandidateDir(candidate, version), "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cmdDefault(s, []string{"java", "21"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdCurrent(context.Background(), s, []string{"java"})
+	}); !strings.Contains(got, "21.0.1-tem") {
+		t.Fatalf("current = %q", got)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdHome(context.Background(), s, []string{"java"})
+	}); !strings.Contains(got, "21.0.1-tem") {
+		t.Fatalf("home = %q", got)
+	}
+	for _, shell := range []string{"bash", "powershell", "fish"} {
+		got := captureStdout(t, func() error {
+			return cmdUse(s, []string{"java", "21", "--shell", shell})
+		})
+		if !strings.Contains(got, "JAVA_HOME") {
+			t.Fatalf("%s use output = %q", shell, got)
+		}
+	}
+	if err := cmdDefault(s, []string{"maven", "3.9", "--shell", "zsh"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdUninstall(s, []string{"maven", "3.9"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdUse(s, []string{"java", "21"}); err == nil {
+		t.Fatal("use without shell hook succeeded")
+	}
+	if _, _, err := shellFlag([]string{"--shell"}); err == nil {
+		t.Fatal("missing shell value accepted")
+	}
+}
+
+func TestEnvMirrorCleanAndInitCommands(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("JKV_DIR", root)
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/usr/bin/fish")
+	s := store.New(root)
+	version := "21.0.1-tem"
+	if err := os.MkdirAll(filepath.Join(s.CandidateDir("java", version), "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDefault("java", version); err != nil {
+		t.Fatal(err)
+	}
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(originalDir) }()
+
+	if err := cmdEnv(s, []string{"init"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdEnv(s, []string{"apply", "--shell", "fish"})
+	}); !strings.Contains(got, "fish_add_path") {
+		t.Fatalf("fish env = %q", got)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdEnv(s, []string{"clear", "--shell", "powershell"})
+	}); !strings.Contains(got, "$env:JKV_DIR") {
+		t.Fatalf("powershell env = %q", got)
+	}
+
+	if err := cmdMirror(context.Background(), []string{"maven"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdMirror(context.Background(), []string{"gradle", "--apply"}); err != nil {
+		t.Fatal(err)
+	}
+	jsonContext := context.WithValue(context.Background(), cliOptionsKey{}, cliOptions{JSON: true})
+	if got := captureStdout(t, func() error {
+		return cmdMirror(jsonContext, []string{"status"})
+	}); !json.Valid([]byte(got)) {
+		t.Fatalf("mirror JSON = %q", got)
+	}
+
+	cachePath := filepath.Join(root, "cache", "downloads", "java", version, "archive")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdClean(context.Background(), s, []string{"downloads", "java", version, "--dry-run"})
+	}); !strings.Contains(got, "将清理") {
+		t.Fatalf("clean dry-run = %q", got)
+	}
+	if err := cmdClean(context.Background(), s, []string{"downloads", "java", version}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, shell := range []string{"bash", "powershell"} {
+		if got := captureStdout(t, func() error {
+			return cmdInit([]string{shell})
+		}); !strings.Contains(got, "jkv") {
+			t.Fatalf("%s init = %q", shell, got)
+		}
+	}
+	if guessedShell() != "fish" {
+		t.Fatalf("guessed shell = %q", guessedShell())
+	}
+}
+
+func TestListInstallRepairAndCompletion(t *testing.T) {
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	file, err := zw.Create("tool/bin/tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(file, "working")
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(archive.Bytes())
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	t.Setenv("JKV_DIR", root)
+	s := store.New(root)
+	release := catalog.Release{
+		Candidate: "maven", Version: "3.9.11", Vendor: "maven", SupportTier: "core",
+		URL: server.URL + "/maven.zip", Available: true, AvailabilityKnown: true,
+	}
+	if err := s.SaveCatalog(catalog.CurrentPlatform(), "maven", store.CatalogCache{
+		FetchedAt: time.Now(), CheckedAt: time.Now(), Releases: []catalog.Release{release},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdList(context.Background(), s, []string{"maven"})
+	}); !strings.Contains(got, "3.9.11") || !strings.Contains(got, "maven") {
+		t.Fatalf("list = %q", got)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdInstall(context.Background(), s, []string{"maven", "3.9.11", "--default"})
+	}); !strings.Contains(got, "已安装并设为默认") {
+		t.Fatalf("install = %q", got)
+	}
+	tool := filepath.Join(s.CandidateDir("maven", "3.9.11"), "bin", "tool")
+	if err := os.WriteFile(tool, []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdRepair(context.Background(), s, []string{"maven", "3.9.11"})
+	}); !strings.Contains(got, "已修复") {
+		t.Fatalf("repair = %q", got)
+	}
+	if body, err := os.ReadFile(tool); err != nil || string(body) != "working" {
+		t.Fatalf("repaired tool = %q, %v", body, err)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdComplete(context.Background(), s, []string{"install", "maven", "3"})
+	}); !strings.Contains(got, "3.9.11") {
+		t.Fatalf("completion output = %q", got)
+	}
+}
+
+func TestFormattingAndOptionHelpers(t *testing.T) {
+	if got := hostOf("https://example.test/a"); got != "example.test" {
+		t.Fatalf("host = %q", got)
+	}
+	if vendorDisplay("temurin") != "Temurin" || vendorDisplay("other") != "other" {
+		t.Fatal("vendor display failed")
+	}
+	if !envEnabledValue(t, "YES") || envEnabledValue(t, "no") {
+		t.Fatal("env flag classification failed")
+	}
+	if formatBytes(512) != "512 B" || !strings.Contains(formatBytes(2048), "KiB") {
+		t.Fatal("byte formatting failed")
+	}
+	if shQuote("a'b") != `'a'\''b'` || psQuote("a'b") != "'a''b'" || fishQuote("a'b") != `'a\'b'` {
+		t.Fatal("shell quoting failed")
+	}
+	if releasesNeedCheck([]catalog.Release{{AvailabilityKnown: true}}) ||
+		!releasesNeedCheck([]catalog.Release{{AvailabilityKnown: false}}) {
+		t.Fatal("availability classification failed")
+	}
+}
+
+func envEnabledValue(t *testing.T, value string) bool {
+	t.Helper()
+	t.Setenv("JKV_TEST_FLAG", value)
+	return envEnabled("JKV_TEST_FLAG")
+}
+
+func captureStdout(t *testing.T, fn func() error) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = w
+	runErr := fn()
+	_ = w.Close()
+	os.Stdout = original
+	b, readErr := io.ReadAll(r)
+	_ = r.Close()
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	return string(b)
 }
