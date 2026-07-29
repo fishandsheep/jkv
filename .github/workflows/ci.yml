@@ -61,6 +61,7 @@ jobs:
           go build -trimpath -o "$root/bin/jkv" ./cmd/jkv
           mkdir -p "$root/candidates/java/21/bin"
           JKV_DIR="$root" "$root/bin/jkv" default java 21
+          # shellcheck disable=SC2016
           JKV_DIR="$root" PATH="$root/bin:$PATH" fish -c '
             jkv init fish | source
             jkv use java 21
@@ -158,7 +159,7 @@ jobs:
           mkdir -p "$HOME"
           sh ./install.sh
           "$JKV_DIR/bin/jkv" version
-          grep -F '# jkv init' "$HOME/.bashrc"
+          grep -F '# >>> jkv managed >>>' "$HOME/.bashrc"
       - name: Run Unix binary installer
         env:
           HOME: ${{ runner.temp }}/jkv-binary-home
@@ -179,7 +180,7 @@ jobs:
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
           ready=false
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
             if curl -fsS "http://127.0.0.1:8765/$asset.sha256" >/dev/null; then
               ready=true
               break
@@ -194,7 +195,7 @@ jobs:
           JKV_DOWNLOAD_BASE=http://127.0.0.1:8765 sh -s < ./install.sh
           "$JKV_DIR/bin/jkv" version
           JKV_DOWNLOAD_BASE=http://127.0.0.1:8765 sh -s < ./install.sh
-          test "$(grep -Fc '# jkv init' "$HOME/.bashrc")" -eq 1
+          test "$(grep -Fc '# >>> jkv managed >>>' "$HOME/.bashrc")" -eq 1
 
           cp "$JKV_DIR/bin/jkv" "$RUNNER_TEMP/jkv-before"
           printf 'bad  %s\n' "$asset" > "$fixture/$asset.sha256"
@@ -251,8 +252,8 @@ jobs:
           $installDir = Join-Path $env:RUNNER_TEMP 'jkv-install'
           & .\install.ps1 -InstallDir $installDir
           & (Join-Path $installDir 'bin\jkv.exe') version
-          if (-not (Select-String -Path $PROFILE -SimpleMatch '# jkv init' -Quiet)) {
-            throw 'PowerShell profile missing jkv init hook'
+          if (-not (Select-String -Path $PROFILE -SimpleMatch '# >>> jkv managed >>>' -Quiet)) {
+            throw 'PowerShell profile missing jkv managed block'
           }
       - name: Run PowerShell binary installer
         shell: pwsh
@@ -286,7 +287,7 @@ jobs:
             Invoke-Expression (Get-Content .\install.ps1 -Raw)
             & (Join-Path $installDir 'bin\jkv.exe') version
             Invoke-Expression (Get-Content .\install.ps1 -Raw)
-            $markerCount = @(Select-String -Path $PROFILE -SimpleMatch '# jkv init').Count
+            $markerCount = @(Select-String -Path $PROFILE -SimpleMatch '# >>> jkv managed >>>').Count
             if ($markerCount -ne 1) { throw "expected one profile marker, got $markerCount" }
 
             $installed = Join-Path $installDir 'bin\jkv.exe'

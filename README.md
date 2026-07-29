@@ -37,7 +37,7 @@ irm <JKV_CN_DOWNLOAD_BASE>/beta/install.ps1 | iex
 
 正式发布页会给出已配置的国内安装脚本地址。安装器优先从国内对象存储下载 jkv 本身；仅在传输失败或校验文件不可用时回退 GitHub。JDK、Maven、Gradle 等工具介质始终来自各自公共官方国内镜像。每个 jkv 二进制都强制校验 SHA-256；校验不匹配不会切换来源。
 
-固定版本入口为 `<JKV_CN_DOWNLOAD_BASE>/v0.2.0-beta.1/install.sh`（PowerShell 对应 `.ps1`）；`beta/` 是便捷指针。GitHub 固定版本后备入口为 `https://github.com/fishandsheep/jkv/releases/download/v0.2.0-beta.1/install.sh`。国内域名在对象存储/CDN配置完成后替换；未配置前发布工作流会明确失败，不会退化成 GitHub 优先。
+固定版本入口为 `<JKV_CN_DOWNLOAD_BASE>/v0.2.0-beta.1/install.sh`（PowerShell 对应 `.ps1`）；`beta/` 是便捷指针。GitHub 固定版本入口为 `https://github.com/fishandsheep/jkv/releases/download/v0.2.0-beta.1/install.sh`。未配置国内地址时，发布仍正常进行，生成的安装脚本直接使用同一 Tag 的 GitHub 资产；以后配置国内地址即可自动切换为国内优先。
 
 默认安装到 `~/.jkv`，无需 Go 或管理员权限。重新打开终端后验证：
 
