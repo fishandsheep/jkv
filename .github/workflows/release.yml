@@ -73,18 +73,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Stamp domestic download base
+      - name: Stamp installer release coordinates
         env:
           CN_DOWNLOAD_BASE: ${{ vars.JKV_CN_DOWNLOAD_BASE }}
         run: |
-          if [ -z "$CN_DOWNLOAD_BASE" ]; then
-            echo 'repository variable JKV_CN_DOWNLOAD_BASE is required' >&2
-            exit 1
-          fi
           mkdir -p dist
           cp install.sh install.ps1 dist/
-          stamped="${CN_DOWNLOAD_BASE%/}/${GITHUB_REF_NAME}"
-          sed -i "s|__JKV_CN_DOWNLOAD_BASE__|$stamped|g" dist/install.sh dist/install.ps1
+          if [ -n "$CN_DOWNLOAD_BASE" ]; then
+            stamped="${CN_DOWNLOAD_BASE%/}/${GITHUB_REF_NAME}"
+            sed -i "s|__JKV_CN_DOWNLOAD_BASE__|$stamped|g" dist/install.sh dist/install.ps1
+          fi
           sed -i "s|__JKV_RELEASE_VERSION__|${GITHUB_REF_NAME}|g" dist/install.sh dist/install.ps1
           (cd dist && sha256sum install.sh > install.sh.sha256)
           (cd dist && sha256sum install.ps1 > install.ps1.sha256)

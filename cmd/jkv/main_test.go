@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -552,8 +553,12 @@ func TestEnvMirrorCleanAndInitCommands(t *testing.T) {
 			t.Fatalf("%s init = %q", shell, got)
 		}
 	}
-	if guessedShell() != "fish" {
-		t.Fatalf("guessed shell = %q", guessedShell())
+	wantShell := "fish"
+	if runtime.GOOS == "windows" {
+		wantShell = "powershell"
+	}
+	if guessedShell() != wantShell {
+		t.Fatalf("guessed shell = %q, want %q", guessedShell(), wantShell)
 	}
 }
 

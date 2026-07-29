@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -771,9 +770,6 @@ func untarWithLimits(path, dest string, limits archiveLimits) error {
 				return err
 			}
 		case tar.TypeSymlink:
-			if runtime.GOOS == "windows" {
-				continue
-			}
 			linkTarget := filepath.Clean(filepath.Join(filepath.Dir(target), filepath.FromSlash(h.Linkname)))
 			cleanDest := filepath.Clean(dest) + string(os.PathSeparator)
 			if linkTarget != filepath.Clean(dest) && !strings.HasPrefix(linkTarget, cleanDest) {
