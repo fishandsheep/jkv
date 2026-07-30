@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -329,6 +331,9 @@ func loadReleases(ctx context.Context, s *store.Store, candidate string, refresh
 			fmt.Fprintf(os.Stderr, "catalog 缓存不可用: %v\n", cacheErr)
 		}
 	}
+	if envEnabled("JKV_EXPERIMENTAL_CATALOG") && !envEnabled("JKV_LEGACY_PROVIDER") {
+		return loadSignedCatalog(ctx, s, candidate, platform, refresh, cached, hasCache, quiet)
+	}
 	client := catalog.NewClient()
 	refreshFailed := false
 	if refresh || !hasCache || now.Sub(cached.FetchedAt) >= catalogCacheTTL {
@@ -374,6 +379,38 @@ func loadReleases(ctx context.Context, s *store.Store, candidate string, refresh
 		}
 	}
 	return cached.Releases, nil
+}
+
+func loadSignedCatalog(ctx context.Context, s *store.Store, candidate string, platform catalog.Platform, refresh bool, cached store.CatalogCache, hasCache, quiet bool) ([]catalog.Release, error) {
+	if !refresh && hasCache && time.Since(cached.FetchedAt) < catalogCacheTTL {
+		return cached.Releases, nil
+	}
+	endpoint, encodedKey := os.Getenv("JKV_CATALOG_ENDPOINT"), os.Getenv("JKV_CATALOG_PUBLIC_KEY")
+	key, err := base64.StdEncoding.DecodeString(encodedKey)
+	if endpoint == "" || err != nil || len(key) != ed25519.PublicKeySize {
+		if hasCache {
+			return cached.Releases, nil
+		}
+		return nil, errors.New("签名 catalog 未配置端点或可信公钥")
+	}
+	snapshot, err := (catalog.RemoteClient{Endpoint: endpoint, TrustedKeys: map[string]ed25519.PublicKey{os.Getenv("JKV_CATALOG_KEY_ID"): ed25519.PublicKey(key)}}).Fetch(ctx)
+	if err != nil {
+		if hasCache {
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "签名 catalog 更新失败，使用缓存: %v\n", err)
+			}
+			return cached.Releases, nil
+		}
+		return nil, err
+	}
+	releases := snapshot.Releases(candidate, platform)
+	if len(releases) == 0 {
+		return nil, fmt.Errorf("签名 catalog 未包含 %s 的当前平台制品", candidate)
+	}
+	if err := s.SaveCatalog(platform, candidate, store.CatalogCache{FetchedAt: time.Now(), Releases: releases}); err != nil && !quiet {
+		fmt.Fprintf(os.Stderr, "写入版本缓存失败: %v\n", err)
+	}
+	return releases, nil
 }
 
 func releasesNeedCheck(releases []catalog.Release) bool {
