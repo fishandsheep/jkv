@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fishandsheep/jkv/signature-envelope-v1.schema.json",
+  "title": "jkv Detached Signature Envelope v1",
+  "type": "object",
+  "required": ["signatures"],
+  "properties": {
+    "signatures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["key_id", "algorithm", "signature"],
+        "properties": {
+          "key_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "algorithm": {"const": "ed25519"},
+          "signature": {"type": "string", "pattern": "^[A-Za-z0-9+/]+={0,2}$"}
+        }
+      }
+    }
+  }
+}

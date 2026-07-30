@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "sequence": 42,
+  "published_at": "2026-07-30T12:00:00Z",
+  "source_commit": "0123456789abcdef0123456789abcdef01234567",
+  "min_client_version": "0.3.0-beta.1",
+  "candidates": [
+    {
+      "name": "java",
+      "display_name": "Java",
+      "description": "Java Development Kit",
+      "homepage": "https://openjdk.org/",
+      "home_env": "JAVA_HOME",
+      "default_vendor": "temurin",
+      "vendors": [
+        {
+          "name": "temurin",
+          "display_name": "Eclipse Temurin",
+          "releases": [
+            {
+              "version": "21.0.8+9",
+              "selector": "21.0.8+9-tem",
+              "support_tier": "core",
+              "artifacts": [
+                {
+                  "artifact_id": "java/temurin/21.0.8+9/all-archives/r1",
+                  "archive_type": "tar.gz",
+                  "platforms": [
+                    {"os": "linux", "arch": "x64"},
+                    {"os": "linux", "arch": "aarch64"},
+                    {"os": "darwin", "arch": "x64"},
+                    {"os": "darwin", "arch": "aarch64"},
+                    {"os": "windows", "arch": "x64"},
+                    {"os": "windows", "arch": "aarch64"}
+                  ],
+                  "url": "https://artifacts.example.invalid/java/temurin-21.tar.gz",
+                  "allowed_redirect_hosts": ["cdn.example.invalid"],
+                  "checksum": {
+                    "algorithm": "sha256",
+                    "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "source": "upstream",
+                    "source_url": "https://checksums.example.invalid/temurin-21.sha256"
+                  }
+                }
+              ]
+            },
+            {
+              "version": "17.0.12+7",
+              "selector": "17.0.12+7-tem",
+              "support_tier": "beta",
+              "artifacts": [
+                {
+                  "artifact_id": "java/temurin/17.0.12+7/windows-x64/zip/r1",
+                  "archive_type": "zip",
+                  "platforms": [{"os": "windows", "arch": "x64"}],
+                  "url": "https://artifacts.example.invalid/java/temurin-17.zip"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "dragonwell",
+          "display_name": "Alibaba Dragonwell",
+          "releases": [{
+            "version": "21.0.8",
+            "selector": "21.0.8-dragonwell",
+            "support_tier": "beta",
+            "artifacts": [{
+              "artifact_id": "java/dragonwell/21.0.8/linux-x64/tar.gz/r1",
+              "archive_type": "tar.gz",
+              "platforms": [{"os": "linux", "arch": "x64"}],
+              "url": "https://artifacts.example.invalid/dragonwell-21.tar.gz"
+            }]
+          }]
+        },
+        {
+          "name": "bisheng",
+          "display_name": "Huawei BiSheng",
+          "releases": [{
+            "version": "21.0.8",
+            "selector": "21.0.8-bisheng",
+            "support_tier": "beta",
+            "artifacts": [{
+              "artifact_id": "java/bisheng/21.0.8/linux-x64/tar.gz/r1",
+              "archive_type": "tar.gz",
+              "platforms": [{"os": "linux", "arch": "x64"}],
+              "url": "https://artifacts.example.invalid/bisheng-21.tar.gz"
+            }]
+          }]
+        }
+      ]
+    },
+    {
+      "name": "maven",
+      "display_name": "Apache Maven",
+      "description": "Java build tool",
+      "homepage": "https://maven.apache.org/",
+      "home_env": "MAVEN_HOME",
+      "default_vendor": "apache",
+      "vendors": [{
+        "name": "apache",
+        "display_name": "Apache",
+        "releases": [{
+          "version": "3.9.11",
+          "selector": "3.9.11",
+          "support_tier": "core",
+          "artifacts": [{
+            "artifact_id": "maven/apache/3.9.11/all-archives/r1",
+            "archive_type": "zip",
+            "platforms": [{"os": "windows", "arch": "x64"}, {"os": "linux", "arch": "x64"}],
+            "url": "https://artifacts.example.invalid/maven-3.9.11.zip"
+          }]
+        }]
+      }]
+    },
+    {
+      "name": "gradle",
+      "display_name": "Gradle",
+      "description": "Build automation tool",
+      "homepage": "https://gradle.org/",
+      "home_env": "GRADLE_HOME",
+      "default_vendor": "gradle",
+      "vendors": [{
+        "name": "gradle",
+        "display_name": "Gradle",
+        "releases": [{
+          "version": "8.14.3",
+          "selector": "8.14.3",
+          "support_tier": "core",
+          "artifacts": [{
+            "artifact_id": "gradle/gradle/8.14.3/all-archives/r1",
+            "archive_type": "zip",
+            "platforms": [{"os": "linux", "arch": "x64"}, {"os": "windows", "arch": "x64"}],
+            "url": "https://artifacts.example.invalid/gradle-8.14.3.zip"
+          }]
+        }]
+      }]
+    },
+    {
+      "name": "ant",
+      "display_name": "Apache Ant",
+      "description": "Java build tool",
+      "homepage": "https://ant.apache.org/",
+      "home_env": "ANT_HOME",
+      "default_vendor": "apache",
+      "vendors": [{
+        "name": "apache",
+        "display_name": "Apache",
+        "releases": [{
+          "version": "1.10.15",
+          "selector": "1.10.15",
+          "support_tier": "beta",
+          "artifacts": [{
+            "artifact_id": "ant/apache/1.10.15/all-archives/r1",
+            "archive_type": "tar.gz",
+            "platforms": [{"os": "linux", "arch": "x64"}],
+            "url": "https://artifacts.example.invalid/ant-1.10.15.tar.gz"
+          }]
+        }]
+      }]
+    },
+    {
+      "name": "groovy",
+      "display_name": "Apache Groovy",
+      "description": "JVM language",
+      "homepage": "https://groovy-lang.org/",
+      "home_env": "GROOVY_HOME",
+      "default_vendor": "apache",
+      "vendors": [{
+        "name": "apache",
+        "display_name": "Apache",
+        "releases": [{
+          "version": "4.0.28",
+          "selector": "4.0.28",
+          "support_tier": "beta",
+          "artifacts": [{
+            "artifact_id": "groovy/apache/4.0.28/all-archives/r1",
+            "archive_type": "zip",
+            "platforms": [{"os": "linux", "arch": "x64"}],
+            "url": "https://artifacts.example.invalid/groovy-4.0.28.zip"
+          }]
+        }]
+      }]
+    },
+    {
+      "name": "jmeter",
+      "display_name": "Apache JMeter",
+      "description": "Load testing tool",
+      "homepage": "https://jmeter.apache.org/",
+      "home_env": "JMETER_HOME",
+      "default_vendor": "apache",
+      "vendors": [{
+        "name": "apache",
+        "display_name": "Apache",
+        "releases": [{
+          "version": "5.6.3",
+          "selector": "5.6.3",
+          "support_tier": "beta",
+          "artifacts": [{
+            "artifact_id": "jmeter/apache/5.6.3/all-archives/r1",
+            "archive_type": "tgz",
+            "platforms": [{"os": "linux", "arch": "x64"}],
+            "url": "https://artifacts.example.invalid/jmeter-5.6.3.tgz"
+          }]
+        }]
+      }]
+    },
+    {
+      "name": "tomcat",
+      "display_name": "Apache Tomcat",
+      "description": "JVM web server",
+      "homepage": "https://tomcat.apache.org/",
+      "home_env": "CATALINA_HOME",
+      "default_vendor": "apache",
+      "vendors": [{
+        "name": "apache",
+        "display_name": "Apache",
+        "releases": [{
+          "version": "11.0.10",
+          "selector": "11.0.10",
+          "support_tier": "beta",
+          "artifacts": [{
+            "artifact_id": "tomcat/apache/11.0.10/all-archives/r1",
+            "archive_type": "tar.gz",
+            "platforms": [{"os": "linux", "arch": "x64"}],
+            "url": "https://artifacts.example.invalid/tomcat-11.0.10.tar.gz"
+          }]
+        }]
+      }]
+    },
+    {
+      "name": "springboot",
+      "display_name": "Spring Boot CLI",
+      "description": "Spring Boot command line tool",
+      "homepage": "https://spring.io/projects/spring-boot",
+      "home_env": "SPRINGBOOT_HOME",
+      "default_vendor": "spring",
+      "vendors": [{
+        "name": "spring",
+        "display_name": "Spring",
+        "releases": [{
+          "version": "3.5.4",
+          "selector": "3.5.4",
+          "support_tier": "beta",
+          "artifacts": [{
+            "artifact_id": "springboot/spring/3.5.4/all-archives/r1",
+            "archive_type": "zip",
+            "platforms": [{"os": "linux", "arch": "x64"}],
+            "url": "https://artifacts.example.invalid/spring-boot-cli-3.5.4.zip"
+          }]
+        }]
+      }]
+    }
+  ],
+  "revocations": [{
+    "artifact_id": "java/temurin/21.0.7/linux-x64/tar.gz/r1",
+    "reason": "compromised",
+    "message": "Historical artifact revoked",
+    "revoked_at": "2026-07-29T12:00:00Z",
+    "replacement_artifact_id": "java/temurin/21.0.8+9/all-archives/r1"
+  }]
+}
