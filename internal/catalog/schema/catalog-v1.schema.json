@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fishandsheep/jkv/catalog-v1.schema.json",
+  "title": "jkv Catalog Snapshot v1",
+  "type": "object",
+  "required": ["schema_version", "sequence", "published_at", "source_commit", "min_client_version", "candidates"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "sequence": {"type": "integer", "minimum": 1},
+    "published_at": {"type": "string", "format": "date-time"},
+    "source_commit": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+    "min_client_version": {"$ref": "#/$defs/identifier"},
+    "candidates": {"type": "array", "minItems": 1, "maxItems": 500, "items": {"$ref": "#/$defs/candidate"}},
+    "revocations": {"type": "array", "items": {"$ref": "#/$defs/revocation"}}
+  },
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 128},
+    "description": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "https_url": {"type": "string", "pattern": "^https://"},
+    "platform": {
+      "type": "object",
+      "required": ["os", "arch"],
+      "properties": {
+        "os": {"enum": ["linux", "darwin", "windows"]},
+        "arch": {"enum": ["x64", "aarch64"]}
+      }
+    },
+    "checksum": {
+      "type": "object",
+      "required": ["algorithm", "value", "source"],
+      "properties": {
+        "algorithm": {"const": "sha256"},
+        "value": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "source": {"enum": ["upstream", "mirror", "catalog-computed"]},
+        "source_url": {"$ref": "#/$defs/https_url"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["artifact_id", "archive_type", "platforms", "url"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/identifier"},
+        "archive_type": {"enum": ["zip", "tar.gz", "tgz"]},
+        "platforms": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/platform"}},
+        "url": {"$ref": "#/$defs/https_url"},
+        "allowed_redirect_hosts": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/identifier"}},
+        "checksum": {"$ref": "#/$defs/checksum"}
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": ["version", "selector", "support_tier", "artifacts"],
+      "properties": {
+        "version": {"$ref": "#/$defs/identifier"},
+        "selector": {"$ref": "#/$defs/identifier"},
+        "support_tier": {"enum": ["core", "beta"]},
+        "artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}}
+      }
+    },
+    "vendor": {
+      "type": "object",
+      "required": ["name", "display_name", "releases"],
+      "properties": {
+        "name": {"$ref": "#/$defs/identifier"},
+        "display_name": {"$ref": "#/$defs/description"},
+        "releases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/release"}}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["name", "display_name", "description", "homepage", "default_vendor", "vendors"],
+      "properties": {
+        "name": {"$ref": "#/$defs/identifier"},
+        "display_name": {"$ref": "#/$defs/description"},
+        "description": {"$ref": "#/$defs/description"},
+        "homepage": {"$ref": "#/$defs/https_url"},
+        "home_env": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*_HOME$"},
+        "default_vendor": {"$ref": "#/$defs/identifier"},
+        "vendors": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/vendor"}}
+      }
+    },
+    "revocation": {
+      "type": "object",
+      "required": ["artifact_id", "reason", "revoked_at"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/identifier"},
+        "reason": {"$ref": "#/$defs/description"},
+        "message": {"type": "string", "maxLength": 2048},
+        "revoked_at": {"type": "string", "format": "date-time"},
+        "replacement_artifact_id": {"$ref": "#/$defs/identifier"}
+      }
+    }
+  }
+}
