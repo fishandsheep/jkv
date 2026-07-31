@@ -5,7 +5,7 @@
 
 面向国内网络的 JVM 工具版本管理器。v0.3 起，版本清单来自独立、人工审核、Ed25519 签名的 Catalog；工具归档仍从各自公共国内源下载。jkv 不下载或执行远端 Provider、插件、脚本。
 
-> 当前公开安装包是 `v0.2.0-beta.2`。`v0.3` 发布包会内置 Catalog 公钥，默认使用 CNB Catalog、网络故障时回退 GitHub Catalog；验签、哈希、schema 或防回滚失败绝不回退到未签名数据。参见[支持政策](docs/support.md)。
+> 当前公开安装包是 `v0.3.0-beta.1`。`v0.3` 发布包内置 Catalog 公钥，默认使用 CNB Catalog、网络故障时回退 GitHub Catalog；验签、哈希、schema 或防回滚失败绝不回退到未签名数据。参见[支持政策](docs/support.md)。
 
 [English](README.en.md) · [命令参考](docs/commands.md) · [故障排查](docs/troubleshooting.md) · [安全政策](SECURITY.md)
 
@@ -26,18 +26,18 @@ v0.3 的版本、URL、平台和支持等级由签名 Catalog 决定；`jkv list
 Linux / macOS，当前公开 beta：
 
 ```sh
-curl -fsSL https://github.com/fishandsheep/jkv/releases/download/v0.2.0-beta.2/install.sh | sh
+curl -fsSL https://github.com/fishandsheep/jkv/releases/download/v0.3.0-beta.1/install.sh | sh
 ```
 
 Windows PowerShell，当前公开 beta：
 
 ```powershell
-irm https://github.com/fishandsheep/jkv/releases/download/v0.2.0-beta.2/install.ps1 | iex
+irm https://github.com/fishandsheep/jkv/releases/download/v0.3.0-beta.1/install.ps1 | iex
 ```
 
-国内对象存储配置完成后，Linux/macOS 使用 `https://<国内域名>/beta/install.sh`，PowerShell 使用同路径 `install.ps1`；URL 只替换域名部分。安装器优先下载国内 jkv 二进制，传输失败时回退 GitHub。JDK、Maven、Gradle 等工具介质始终来自 Catalog 指定的公共国内源。每个 jkv 二进制都校验 SHA-256；校验不匹配不会切换来源。
+CNB 二进制镜像发布后，Linux/macOS 使用 `https://cnb.cool/<组织>/<仓库>/-/releases/download/<tag>/install.sh`，PowerShell 将文件名换成 `install.ps1`。安装器优先下载同一 tag 的 CNB 二进制，传输失败时回退 GitHub。JDK、Maven、Gradle 等工具介质始终来自 Catalog 指定的公共国内源。每个 jkv 二进制都校验 SHA-256；校验不匹配不会切换来源。
 
-固定版本入口为 `https://github.com/fishandsheep/jkv/releases/download/<tag>/install.sh`；PowerShell 将文件名换成 `install.ps1`。`beta/` 是国内便捷指针。未配置国内地址时，发布仍正常进行，安装脚本直接使用同一 Tag 的 GitHub 资产。
+固定版本入口为 `https://github.com/fishandsheep/jkv/releases/download/<tag>/install.sh`；CNB 对应为 `https://cnb.cool/<组织>/<仓库>/-/releases/download/<tag>/install.sh`；PowerShell 将文件名换成 `install.ps1`。每个 tag 固定且不可覆盖。
 
 默认安装到 `~/.jkv`，无需 Go 或管理员权限。重新打开终端后验证：
 
