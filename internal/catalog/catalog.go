@@ -28,10 +28,12 @@ type Release struct {
 	Candidate          string `json:"candidate"`
 	Version            string `json:"version"`
 	Vendor             string `json:"vendor,omitempty"`
+	ArtifactID         string `json:"artifact_id,omitempty"`
 	SupportTier        string `json:"support_tier"`
 	IntegrityLevel     string `json:"integrity_level"`
 	URL                string `json:"url"`
 	ChecksumURL        string `json:"checksum_url,omitempty"`
+	ChecksumValue      string `json:"checksum_value,omitempty"`
 	Available          bool   `json:"available"`
 	AvailabilityKnown  bool   `json:"availability_known"`
 	AvailabilityStatus string `json:"availability_status"`
@@ -130,7 +132,7 @@ func (c *Client) List(ctx context.Context, candidate string, p Platform) ([]Rele
 		if releases[i].AvailabilityStatus == "" {
 			releases[i].AvailabilityStatus = "unchecked"
 		}
-		if releases[i].ChecksumURL != "" {
+		if releases[i].ChecksumURL != "" || releases[i].ChecksumValue != "" {
 			releases[i].IntegrityLevel = "checksum"
 		} else {
 			releases[i].IntegrityLevel = "https-only"

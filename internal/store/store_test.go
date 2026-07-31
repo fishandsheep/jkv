@@ -394,6 +394,43 @@ func TestInstallStrictChecksumRejectsBeforeDownload(t *testing.T) {
 	}
 }
 
+func TestInstallStrictChecksumUsesCatalogDigest(t *testing.T) {
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	w, err := zw.Create("tool/bin/tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(w, "tool"); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	digest := sha256.Sum256(archive.Bytes())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(archive.Bytes())
+	}))
+	defer server.Close()
+
+	release := catalog.Release{
+		Candidate:     "maven",
+		Version:       "1.0",
+		URL:           server.URL + "/tool.zip",
+		ChecksumValue: hex.EncodeToString(digest[:]),
+	}
+	if err := New(t.TempDir()).InstallWithOptions(context.Background(), release, io.Discard, InstallOptions{RequireChecksum: true}); err != nil {
+		t.Fatalf("catalog checksum install = %v", err)
+	}
+
+	release.ChecksumValue = strings.Repeat("0", 64)
+	err = New(t.TempDir()).InstallWithOptions(context.Background(), release, io.Discard, InstallOptions{RequireChecksum: true})
+	if !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("catalog checksum mismatch = %v", err)
+	}
+}
+
 func TestConcurrentInstallSameVersionIsSafe(t *testing.T) {
 	var archive bytes.Buffer
 	zw := zip.NewWriter(&archive)

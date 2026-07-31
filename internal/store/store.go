@@ -121,7 +121,7 @@ func (s *Store) Repair(ctx context.Context, r catalog.Release, progress io.Write
 }
 
 func (s *Store) InstallWithOptions(ctx context.Context, r catalog.Release, progress io.Writer, options InstallOptions) error {
-	if options.RequireChecksum && r.ChecksumURL == "" {
+	if options.RequireChecksum && r.ChecksumURL == "" && r.ChecksumValue == "" {
 		return fmt.Errorf("%w: 严格模式要求 SHA-256，当前源未提供", ErrIntegrity)
 	}
 	if !validSegment(r.Candidate) || !validSegment(r.Version) {
@@ -304,7 +304,12 @@ func (s *Store) obtainArchive(ctx context.Context, r catalog.Release, staging st
 	if err != nil {
 		return "", err
 	}
-	if r.ChecksumURL != "" {
+	if r.ChecksumValue != "" {
+		if !strings.EqualFold(sum, r.ChecksumValue) {
+			_ = os.Remove(tmpPath)
+			return "", fmt.Errorf("%w: Catalog SHA-256 不匹配", ErrIntegrity)
+		}
+	} else if r.ChecksumURL != "" {
 		if err := s.verifyChecksum(ctx, r.ChecksumURL, sum); err != nil {
 			_ = os.Remove(tmpPath)
 			return "", err

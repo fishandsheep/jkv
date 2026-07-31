@@ -49,10 +49,18 @@ jobs:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: '0'
+          CATALOG_KEY_ID: ${{ vars.CATALOG_KEY_ID }}
+          CATALOG_PUBLIC_KEY: ${{ vars.CATALOG_ED25519_PUBLIC_KEY_BASE64 }}
         run: |
+          case "$GITHUB_REF_NAME" in
+            v0.3.*)
+              test -n "$CATALOG_KEY_ID"
+              test -n "$CATALOG_PUBLIC_KEY"
+              ;;
+          esac
           mkdir -p dist
           name="jkv-${GOOS}-${GOARCH}${{ matrix.ext }}"
-          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/$name" ./cmd/jkv
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.catalogKeyID=${CATALOG_KEY_ID} -X main.catalogPublicKeyBase64=${CATALOG_PUBLIC_KEY}" -o "dist/$name" ./cmd/jkv
           (cd dist && sha256sum "$name" > "$name.sha256")
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0

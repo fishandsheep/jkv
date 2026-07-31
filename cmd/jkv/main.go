@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -23,6 +25,16 @@ import (
 )
 
 var version = "dev"
+
+// Release workflow injects these public values for v0.3 binaries. Environment
+// values remain available for development and emergency endpoint migration.
+var (
+	catalogKeyID              = ""
+	catalogPublicKeyBase64    = ""
+	catalogCNBDownloadBase    = "https://cnb.cool/fishandsheep/jkv-catalog/-/releases/download"
+	catalogGitHubDownloadBase = "https://github.com/fishandsheep/jkv-catalog/releases/download"
+	catalogHTTPClient         = http.DefaultClient
+)
 
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
@@ -192,6 +204,8 @@ func usage() {
 
 const catalogCacheTTL = 6 * time.Hour
 
+var clientVersionRE = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$`)
+
 func cmdList(ctx context.Context, s *store.Store, args []string) error {
 	refresh := false
 	var positional []string
@@ -203,11 +217,19 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 		}
 	}
 	if len(positional) == 0 {
+		candidates := catalog.Candidates
+		if signedCatalogEnabled() {
+			snapshot, err := loadSignedSnapshot(ctx, s, refresh, false)
+			if err != nil {
+				return err
+			}
+			candidates = snapshotCandidateList(snapshot)
+		}
 		if optionsFromContext(ctx).JSON {
-			return writeJSON(catalog.Candidates)
+			return writeJSON(candidates)
 		}
 		fmt.Printf("%s %s %s %s\n", padRight("CANDIDATE", 12), padRight("说明", 36), padRight("国内源", 22), "平台")
-		for _, c := range catalog.Candidates {
+		for _, c := range candidates {
 			fmt.Printf("%s %s %s %s\n", padRight(c.Name, 12), padRight(c.Description, 36), padRight(c.Source, 22), c.Platforms)
 		}
 		return nil
@@ -216,7 +238,7 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 		return errors.New("用法: jkv list [candidate] [--refresh]")
 	}
 	candidate := positional[0]
-	if !catalog.IsCandidate(candidate) {
+	if !signedCatalogEnabled() && !catalog.IsCandidate(candidate) {
 		return fmt.Errorf("不支持 candidate %q", candidate)
 	}
 	releases, err := loadReleases(ctx, s, candidate, refresh, true, false)
@@ -331,7 +353,7 @@ func loadReleases(ctx context.Context, s *store.Store, candidate string, refresh
 			fmt.Fprintf(os.Stderr, "catalog 缓存不可用: %v\n", cacheErr)
 		}
 	}
-	if envEnabled("JKV_EXPERIMENTAL_CATALOG") && !envEnabled("JKV_LEGACY_PROVIDER") {
+	if signedCatalogEnabled() {
 		return loadSignedCatalog(ctx, s, candidate, platform, refresh, cached, hasCache, quiet)
 	}
 	client := catalog.NewClient()
@@ -381,36 +403,304 @@ func loadReleases(ctx context.Context, s *store.Store, candidate string, refresh
 	return cached.Releases, nil
 }
 
-func loadSignedCatalog(ctx context.Context, s *store.Store, candidate string, platform catalog.Platform, refresh bool, cached store.CatalogCache, hasCache, quiet bool) ([]catalog.Release, error) {
-	if !refresh && hasCache && time.Since(cached.FetchedAt) < catalogCacheTTL {
-		return cached.Releases, nil
+func signedCatalogEnabled() bool {
+	if envEnabled("JKV_LEGACY_PROVIDER") {
+		return false
 	}
-	endpoint, encodedKey := os.Getenv("JKV_CATALOG_ENDPOINT"), os.Getenv("JKV_CATALOG_PUBLIC_KEY")
+	return envEnabled("JKV_EXPERIMENTAL_CATALOG") || catalogTrustConfigured()
+}
+
+func catalogTrustConfigured() bool {
+	encodedKey := os.Getenv("JKV_CATALOG_PUBLIC_KEY")
+	if encodedKey == "" {
+		encodedKey = catalogPublicKeyBase64
+	}
 	key, err := base64.StdEncoding.DecodeString(encodedKey)
-	if endpoint == "" || err != nil || len(key) != ed25519.PublicKeySize {
-		if hasCache {
-			return cached.Releases, nil
-		}
-		return nil, errors.New("签名 catalog 未配置端点或可信公钥")
+	return err == nil && len(key) == ed25519.PublicKeySize && catalogConfiguredKeyID() != ""
+}
+
+func catalogConfiguredKeyID() string {
+	if value := os.Getenv("JKV_CATALOG_KEY_ID"); value != "" {
+		return value
 	}
-	snapshot, err := (catalog.RemoteClient{Endpoint: endpoint, TrustedKeys: map[string]ed25519.PublicKey{os.Getenv("JKV_CATALOG_KEY_ID"): ed25519.PublicKey(key)}}).Fetch(ctx)
+	return catalogKeyID
+}
+
+func catalogSettings() (map[string]ed25519.PublicKey, []catalog.Endpoint, error) {
+	encodedKey := os.Getenv("JKV_CATALOG_PUBLIC_KEY")
+	if encodedKey == "" {
+		encodedKey = catalogPublicKeyBase64
+	}
+	key, err := base64.StdEncoding.DecodeString(encodedKey)
+	if err != nil || len(key) != ed25519.PublicKeySize || catalogConfiguredKeyID() == "" {
+		return nil, nil, errors.New("签名 catalog 未配置可信公钥")
+	}
+	primary := os.Getenv("JKV_CATALOG_ENDPOINT")
+	if primary == "" {
+		primary = catalogCNBDownloadBase
+	}
+	fallback := os.Getenv("JKV_CATALOG_FALLBACK_ENDPOINT")
+	if fallback == "" && primary != catalogGitHubDownloadBase {
+		fallback = catalogGitHubDownloadBase
+	}
+	endpoints := []catalog.Endpoint{catalog.ReleaseEndpoint("CNB", primary)}
+	if fallback != "" {
+		endpoints = append(endpoints, catalog.ReleaseEndpoint("GitHub", fallback))
+	}
+	return map[string]ed25519.PublicKey{catalogConfiguredKeyID(): ed25519.PublicKey(key)}, endpoints, nil
+}
+
+func loadSignedCatalog(ctx context.Context, s *store.Store, candidate string, platform catalog.Platform, refresh bool, _ store.CatalogCache, _ bool, quiet bool) ([]catalog.Release, error) {
+	snapshot, err := loadSignedSnapshot(ctx, s, refresh, quiet)
 	if err != nil {
-		if hasCache {
-			if !quiet {
-				fmt.Fprintf(os.Stderr, "签名 catalog 更新失败，使用缓存: %v\n", err)
-			}
-			return cached.Releases, nil
-		}
 		return nil, err
 	}
+	return releasesFromSnapshot(snapshot, candidate, platform)
+}
+
+func loadSignedSnapshot(ctx context.Context, s *store.Store, refresh, quiet bool) (catalog.Snapshot, error) {
+	keys, endpoints, settingsErr := catalogSettings()
+	state, stateErr := s.LoadTrustedCatalog()
+	trusted, trustedErr := verifiedTrustedSnapshot(state, keys)
+	if !refresh && trustedErr == nil && time.Since(trusted.FetchedAt) < catalogCacheTTL {
+		return compatibleCatalogSnapshot(trusted.Snapshot)
+	}
+	if settingsErr != nil {
+		if trustedErr == nil {
+			return compatibleCatalogSnapshot(trusted.Snapshot)
+		}
+		return catalog.Snapshot{}, settingsErr
+	}
+	fetched, err := (catalog.RemoteClient{Endpoints: endpoints, HTTP: catalogHTTPClient, TrustedKeys: keys}).FetchDocument(ctx)
+	if err != nil {
+		if trustedErr == nil {
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "签名 catalog 更新失败，使用可信快照: %v\n", err)
+			}
+			return compatibleCatalogSnapshot(trusted.Snapshot)
+		}
+		return catalog.Snapshot{}, err
+	}
+	if stateErr != nil && !os.IsNotExist(stateErr) {
+		return catalog.Snapshot{}, fmt.Errorf("读取可信 catalog 状态: %w", stateErr)
+	}
+	if err := saveFetchedCatalog(s, state, fetched); err != nil {
+		if trustedErr == nil && !quiet {
+			fmt.Fprintf(os.Stderr, "保存可信 catalog 失败，使用已有快照: %v\n", err)
+			return trusted.Snapshot, nil
+		}
+		return catalog.Snapshot{}, err
+	}
+	return compatibleCatalogSnapshot(fetched.Snapshot)
+}
+
+func compatibleCatalogSnapshot(snapshot catalog.Snapshot) (catalog.Snapshot, error) {
+	if version == "dev" || versionAtLeast(version, snapshot.MinClientVersion) {
+		return snapshot, nil
+	}
+	return catalog.Snapshot{}, fmt.Errorf("Catalog 要求 jkv >= %s，当前为 %s；请升级 jkv", snapshot.MinClientVersion, version)
+}
+
+func versionAtLeast(current, minimum string) bool {
+	currentParts, currentOK := parseClientVersion(current)
+	minimumParts, minimumOK := parseClientVersion(minimum)
+	if !currentOK || !minimumOK {
+		return false
+	}
+	for index := 0; index < 3; index++ {
+		if currentParts.numbers[index] != minimumParts.numbers[index] {
+			return currentParts.numbers[index] > minimumParts.numbers[index]
+		}
+	}
+	return comparePrerelease(currentParts.prerelease, minimumParts.prerelease) >= 0
+}
+
+type parsedClientVersion struct {
+	numbers    [3]int
+	prerelease string
+}
+
+func parseClientVersion(value string) (parsedClientVersion, bool) {
+	match := clientVersionRE.FindStringSubmatch(value)
+	if match == nil {
+		return parsedClientVersion{}, false
+	}
+	var result parsedClientVersion
+	for index := range result.numbers {
+		number, err := strconv.Atoi(match[index+1])
+		if err != nil || number < 0 {
+			return parsedClientVersion{}, false
+		}
+		result.numbers[index] = number
+	}
+	result.prerelease = match[4]
+	return result, true
+}
+
+func comparePrerelease(left, right string) int {
+	if left == right {
+		return 0
+	}
+	if left == "" {
+		return 1
+	}
+	if right == "" {
+		return -1
+	}
+	leftParts, rightParts := strings.Split(left, "."), strings.Split(right, ".")
+	for index := 0; index < len(leftParts) && index < len(rightParts); index++ {
+		if leftParts[index] == rightParts[index] {
+			continue
+		}
+		leftNumber, leftNumeric := prereleaseNumber(leftParts[index])
+		rightNumber, rightNumeric := prereleaseNumber(rightParts[index])
+		switch {
+		case leftNumeric && rightNumeric:
+			if leftNumber < rightNumber {
+				return -1
+			}
+			return 1
+		case leftNumeric:
+			return -1
+		case rightNumeric:
+			return 1
+		case leftParts[index] < rightParts[index]:
+			return -1
+		default:
+			return 1
+		}
+	}
+	if len(leftParts) < len(rightParts) {
+		return -1
+	}
+	return 1
+}
+
+func prereleaseNumber(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+	}
+	number, err := strconv.Atoi(value)
+	return number, err == nil
+}
+
+type verifiedSnapshot struct {
+	store.TrustedCatalogSnapshot
+	Snapshot catalog.Snapshot
+}
+
+func verifiedTrustedSnapshot(state store.TrustedCatalogState, keys map[string]ed25519.PublicKey) (verifiedSnapshot, error) {
+	if len(state.Snapshots) == 0 {
+		return verifiedSnapshot{}, os.ErrNotExist
+	}
+	if len(keys) == 0 {
+		return verifiedSnapshot{}, errors.New("签名 catalog 未配置可信公钥")
+	}
+	current := state.Snapshots[0]
+	for _, snapshot := range state.Snapshots[1:] {
+		if snapshot.Sequence > current.Sequence {
+			current = snapshot
+		}
+	}
+	value, err := catalog.VerifyLatestSnapshot(current.Latest, current.LatestSignature, current.Snapshot, current.SnapshotSignature, keys)
+	if err != nil {
+		return verifiedSnapshot{}, fmt.Errorf("验证本地可信 catalog: %w", err)
+	}
+	if value.Sequence != current.Sequence || value.Sequence != state.HighestSequence {
+		return verifiedSnapshot{}, errors.New("本地可信 catalog 序号不一致")
+	}
+	return verifiedSnapshot{TrustedCatalogSnapshot: current, Snapshot: value}, nil
+}
+
+func saveFetchedCatalog(s *store.Store, state store.TrustedCatalogState, fetched catalog.FetchedSnapshot) error {
+	if fetched.Snapshot.Sequence < state.HighestSequence {
+		return fmt.Errorf("拒绝 catalog 回滚：远端 sequence %d 低于已见 %d", fetched.Snapshot.Sequence, state.HighestSequence)
+	}
+	for index, known := range state.Snapshots {
+		if known.Sequence != fetched.Snapshot.Sequence {
+			continue
+		}
+		if !bytes.Equal(known.Snapshot, fetched.SnapshotBytes) ||
+			!bytes.Equal(known.SnapshotSignature, fetched.SnapshotSignature) ||
+			!bytes.Equal(known.Latest, fetched.LatestBytes) ||
+			!bytes.Equal(known.LatestSignature, fetched.LatestSignature) {
+			return fmt.Errorf("拒绝 catalog：sequence %d 对应不同字节", fetched.Snapshot.Sequence)
+		}
+		state.Snapshots[index].FetchedAt = time.Now().UTC()
+		state.Snapshots[index].Endpoint = fetched.Endpoint
+		state.Snapshots[index].KeyIDs = append([]string(nil), fetched.KeyIDs...)
+		return s.SaveTrustedCatalog(state)
+	}
+	if fetched.Snapshot.Sequence == state.HighestSequence && state.HighestSequence != 0 {
+		return fmt.Errorf("拒绝 catalog：sequence %d 缺少本地可信快照", fetched.Snapshot.Sequence)
+	}
+	state.HighestSequence = fetched.Snapshot.Sequence
+	state.Snapshots = append(state.Snapshots, store.TrustedCatalogSnapshot{
+		Sequence:          fetched.Snapshot.Sequence,
+		Endpoint:          fetched.Endpoint,
+		FetchedAt:         time.Now().UTC(),
+		KeyIDs:            append([]string(nil), fetched.KeyIDs...),
+		Snapshot:          append([]byte(nil), fetched.SnapshotBytes...),
+		SnapshotSignature: append([]byte(nil), fetched.SnapshotSignature...),
+		Latest:            append([]byte(nil), fetched.LatestBytes...),
+		LatestSignature:   append([]byte(nil), fetched.LatestSignature...),
+	})
+	state.Revocations = mergeRevocations(state.Revocations, fetched.Snapshot.Revocations)
+	return s.SaveTrustedCatalog(state)
+}
+
+func mergeRevocations(existing, incoming []catalog.Revocation) []catalog.Revocation {
+	byID := make(map[string]catalog.Revocation, len(existing)+len(incoming))
+	for _, item := range existing {
+		byID[item.ArtifactID] = item
+	}
+	for _, item := range incoming {
+		byID[item.ArtifactID] = item
+	}
+	ids := sortedKeys(byID)
+	out := make([]catalog.Revocation, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, byID[id])
+	}
+	return out
+}
+
+func releasesFromSnapshot(snapshot catalog.Snapshot, candidate string, platform catalog.Platform) ([]catalog.Release, error) {
 	releases := snapshot.Releases(candidate, platform)
 	if len(releases) == 0 {
 		return nil, fmt.Errorf("签名 catalog 未包含 %s 的当前平台制品", candidate)
 	}
-	if err := s.SaveCatalog(platform, candidate, store.CatalogCache{FetchedAt: time.Now(), Releases: releases}); err != nil && !quiet {
-		fmt.Fprintf(os.Stderr, "写入版本缓存失败: %v\n", err)
-	}
 	return releases, nil
+}
+
+func snapshotCandidateList(snapshot catalog.Snapshot) []catalog.Candidate {
+	out := make([]catalog.Candidate, 0, len(snapshot.Candidates))
+	for _, candidate := range snapshot.Candidates {
+		out = append(out, catalog.Candidate{
+			Name:        candidate.Name,
+			Description: candidate.Description,
+			Source:      "签名 Catalog",
+			Platforms:   "按 Catalog",
+			SupportTier: candidateTier(candidate),
+		})
+	}
+	return out
+}
+
+func candidateTier(candidate catalog.SnapshotCandidate) string {
+	for _, vendor := range candidate.Vendors {
+		for _, release := range vendor.Releases {
+			if release.SupportTier == "core" {
+				return "core"
+			}
+		}
+	}
+	return "beta"
 }
 
 func releasesNeedCheck(releases []catalog.Release) bool {
@@ -452,7 +742,7 @@ func cmdInstall(ctx context.Context, s *store.Store, args []string) error {
 		return errors.New("用法: jkv install <candidate> [version] [--default]")
 	}
 	candidate := pos[0]
-	if !catalog.IsCandidate(candidate) {
+	if !signedCatalogEnabled() && !catalog.IsCandidate(candidate) {
 		return fmt.Errorf("不支持 candidate %q", candidate)
 	}
 	want := ""
@@ -476,8 +766,11 @@ func cmdInstall(ctx context.Context, s *store.Store, args []string) error {
 			return err
 		}
 	}
+	if err := rejectRevokedArtifact(s, r); err != nil {
+		return err
+	}
 	options := optionsFromContext(ctx)
-	if r.ChecksumURL == "" {
+	if r.ChecksumURL == "" && r.ChecksumValue == "" {
 		fmt.Fprintln(os.Stderr, "警告: 此镜像未提供同源 SHA-256；下载仅由 HTTPS 保护。")
 	}
 	if !options.Quiet {
@@ -523,6 +816,9 @@ func cmdRepair(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectRevokedArtifact(s, release); err != nil {
+		return err
+	}
 	var progress io.Writer = os.Stderr
 	if optionsFromContext(ctx).Quiet || !isTerminal(os.Stderr) {
 		progress = nil
@@ -535,6 +831,21 @@ func cmdRepair(ctx context.Context, s *store.Store, args []string) error {
 	}
 	fmt.Printf("已修复: %s %s\n", args[0], version)
 	return nil
+}
+
+func rejectRevokedArtifact(s *store.Store, release catalog.Release) error {
+	revocation, revoked, err := s.ArtifactRevocation(release.ArtifactID)
+	if err != nil {
+		return fmt.Errorf("读取 artifact 撤销状态: %w", err)
+	}
+	if !revoked {
+		return nil
+	}
+	message := revocation.Reason
+	if revocation.Message != "" {
+		message = revocation.Message
+	}
+	return fmt.Errorf("制品 %s 已撤销：%s", release.ArtifactID, message)
 }
 
 func selectRelease(releases []catalog.Release, want string) (catalog.Release, error) {
@@ -640,7 +951,7 @@ func cmdDefault(s *store.Store, args []string) error {
 }
 
 func installedMatch(s *store.Store, candidate, want string) (string, error) {
-	if !catalog.IsCandidate(candidate) {
+	if candidate == "" || strings.ContainsAny(candidate, `/\\`) {
 		return "", fmt.Errorf("不支持 candidate %q", candidate)
 	}
 	versions, err := s.Installed(candidate)
@@ -764,8 +1075,17 @@ type doctorResult struct {
 	HTTPProxy  bool                 `json:"http_proxy"`
 	NoProxy    bool                 `json:"no_proxy"`
 	Catalog    map[string]string    `json:"catalog"`
+	Trust      *doctorCatalogTrust  `json:"catalog_trust,omitempty"`
 	Installed  map[string]int       `json:"installed"`
 	Mirrors    []doctorMirrorResult `json:"mirrors"`
+}
+
+type doctorCatalogTrust struct {
+	Sequence       uint64   `json:"sequence"`
+	SnapshotAge    string   `json:"snapshot_age"`
+	Endpoint       string   `json:"endpoint"`
+	VerifiedKeyIDs []string `json:"verified_key_ids"`
+	Revocations    int      `json:"revocations"`
 }
 
 type doctorMirrorResult struct {
@@ -800,6 +1120,21 @@ func cmdDoctor(ctx context.Context, s *store.Store, args []string) error {
 		}
 	}
 	platform := catalog.CurrentPlatform()
+	if state, err := s.LoadTrustedCatalog(); err == nil && len(state.Snapshots) > 0 {
+		current := state.Snapshots[0]
+		for _, snapshot := range state.Snapshots[1:] {
+			if snapshot.Sequence > current.Sequence {
+				current = snapshot
+			}
+		}
+		result.Trust = &doctorCatalogTrust{
+			Sequence:       state.HighestSequence,
+			SnapshotAge:    time.Since(current.FetchedAt).Round(time.Second).String(),
+			Endpoint:       current.Endpoint,
+			VerifiedKeyIDs: append([]string(nil), current.KeyIDs...),
+			Revocations:    len(state.Revocations),
+		}
+	}
 	for _, candidate := range []string{"java", "maven", "gradle"} {
 		if cached, err := s.LoadCatalog(platform, candidate); err == nil && len(cached.Releases) > 0 {
 			result.Catalog[candidate] = fmt.Sprintf("cached:%d", len(cached.Releases))
@@ -855,6 +1190,9 @@ func cmdDoctor(ctx context.Context, s *store.Store, args []string) error {
 		return nil
 	}
 	fmt.Printf("jkv doctor\n目录: %s\n平台: %s/%s\n可写: %t\n", result.Root, result.OS, result.Arch, result.Writable)
+	if result.Trust != nil {
+		fmt.Printf("可信 Catalog: sequence %d，年龄 %s，端点 %s，撤销 %d\n", result.Trust.Sequence, result.Trust.SnapshotAge, result.Trust.Endpoint, result.Trust.Revocations)
+	}
 	for _, mirror := range result.Mirrors {
 		fmt.Printf("镜像 %-8s %-38s 可达: %t", mirror.Name, mirror.Host, mirror.Reachable)
 		if mirror.Status != 0 {
