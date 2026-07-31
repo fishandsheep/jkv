@@ -132,32 +132,7 @@ jobs:
           (cd dist && for sum in *.sha256; do sha256sum --check "$sum"; done)
           test "$(./dist/jkv-linux-amd64 version)" = "jkv ${GITHUB_REF_NAME}"
           test -s "dist/${GITHUB_REF_NAME}.provenance.sigstore.json"
-      - name: Upload to domestic object storage
-        if: ${{ vars.JKV_CN_S3_URI != '' }}
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.JKV_CN_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.JKV_CN_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ vars.JKV_CN_S3_REGION }}
-          CN_S3_URI: ${{ vars.JKV_CN_S3_URI }}
-          CN_S3_ENDPOINT: ${{ vars.JKV_CN_S3_ENDPOINT }}
-        run: |
-          target="${CN_S3_URI%/}/${GITHUB_REF_NAME}/"
-          case "$GITHUB_REF_NAME" in *-*) channel=beta ;; *) channel=latest ;; esac
-          channel_target="${CN_S3_URI%/}/${channel}/"
-          if [ -n "$CN_S3_ENDPOINT" ]; then
-            aws s3 cp dist/ "$target" --recursive --endpoint-url "$CN_S3_ENDPOINT"
-            aws s3 cp dist/install.sh "$channel_target/install.sh" --endpoint-url "$CN_S3_ENDPOINT"
-            aws s3 cp dist/install.sh.sha256 "$channel_target/install.sh.sha256" --endpoint-url "$CN_S3_ENDPOINT"
-            aws s3 cp dist/install.ps1 "$channel_target/install.ps1" --endpoint-url "$CN_S3_ENDPOINT"
-            aws s3 cp dist/install.ps1.sha256 "$channel_target/install.ps1.sha256" --endpoint-url "$CN_S3_ENDPOINT"
-          else
-            aws s3 cp dist/ "$target" --recursive
-            aws s3 cp dist/install.sh "$channel_target/install.sh"
-            aws s3 cp dist/install.sh.sha256 "$channel_target/install.sh.sha256"
-            aws s3 cp dist/install.ps1 "$channel_target/install.ps1"
-            aws s3 cp dist/install.ps1.sha256 "$channel_target/install.ps1.sha256"
-          fi
-      - name: Create GitHub fallback release
+      - name: Create and verify GitHub draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -168,8 +143,101 @@ jobs:
             echo "缺少版本发布说明: $notes" >&2
             exit 1
           fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "GitHub release already exists: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" dist/* \
             --verify-tag \
+            --draft \
             --title "$GITHUB_REF_NAME" \
             --notes-file "$notes" \
             "${flags[@]}"
+          mkdir github-draft
+          gh release download "$GITHUB_REF_NAME" --dir github-draft --pattern '*'
+          for file in dist/*; do
+            cmp "$file" "github-draft/$(basename "$file")"
+          done
+      - name: Create and verify CNB draft release
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_JKV_TOKEN }}
+          CNB_REPOSITORY: ${{ vars.CNB_JKV_REPOSITORY }}
+          CNB_DOWNLOAD_BASE: ${{ vars.JKV_CN_DOWNLOAD_BASE }}
+        run: |
+          test -n "$CNB_TOKEN" || { echo '缺少 CNB_JKV_TOKEN' >&2; exit 1; }
+          test -n "$CNB_REPOSITORY" || { echo '缺少 CNB_JKV_REPOSITORY' >&2; exit 1; }
+          expected_base="https://cnb.cool/${CNB_REPOSITORY}/-/releases/download"
+          test "${CNB_DOWNLOAD_BASE%/}" = "$expected_base" || {
+            echo "JKV_CN_DOWNLOAD_BASE 必须为 $expected_base" >&2
+            exit 1
+          }
+          api="https://api.cnb.cool/${CNB_REPOSITORY}/-/releases"
+          headers=(-H "Authorization: Bearer $CNB_TOKEN" -H 'Accept: application/vnd.cnb.api+json')
+          releases="$(curl -fsS "$api?page=1&page_size=100" "${headers[@]}" || true)"
+          existing="$(jq -e --arg tag "$GITHUB_REF_NAME" '.[]? | select(.tag_name == $tag)' <<<"$releases" || true)"
+          release_id="$(jq -r '.id // empty' <<<"$existing")"
+          if test -z "$release_id"; then
+            release="$(curl -sS --fail-with-body -X POST "$api" "${headers[@]}" -H 'Content-Type: application/json' \
+              --data "$(jq -nc --arg tag "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" '{tag_name:$tag,target_commitish:"main",name:$tag,body:("jkv release from GitHub commit " + $commit),draft:true,make_latest:"false"}')")"
+            release_id="$(jq -er '.id' <<<"$release")"
+          elif test "$(jq -er '.draft' <<<"$existing")" != true; then
+            echo "CNB release already published and immutable: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          upload() {
+            file="$1"
+            form="$(jq -nc --arg name "$(basename "$file")" --argjson size "$(wc -c < "$file")" '{asset_name:$name,size:$size,ttl:0,overwrite:true}')"
+            ticket="$(curl -fsS -X POST "$api/$release_id/asset-upload-url" "${headers[@]}" -H 'Content-Type: application/json' --data "$form")"
+            curl -fsS -X PUT --upload-file "$file" "$(jq -er '.upload_url' <<<"$ticket")"
+            curl -fsS -X POST "${headers[@]}" "$(jq -er '.verify_url' <<<"$ticket")?ttl=0"
+          }
+          for file in dist/*; do upload "$file"; done
+          release_after_upload="$(curl -fsS "$api/$release_id" "${headers[@]}")"
+          verify_cnb_asset() {
+            file="$1"
+            name="$(basename "$file")"
+            asset="$(jq -e --arg name "$name" '.assets[]? | select(.name == $name)' <<<"$release_after_upload")" || {
+              echo "CNB asset not found after upload: $name" >&2
+              return 1
+            }
+            hash_algo="$(jq -er '.hash_algo // empty' <<<"$asset" | tr '[:upper:]' '[:lower:]')"
+            expected_hash="$(jq -er '.hash_value' <<<"$asset" | tr '[:upper:]' '[:lower:]')"
+            expected_size="$(jq -er '.size' <<<"$asset")"
+            actual_hash="$(sha256sum "$file" | awk '{print $1}')"
+            actual_size="$(wc -c < "$file" | tr -d '[:space:]')"
+            case "$hash_algo" in sha256|sha-256|sha_256) ;; *) echo "unsupported CNB hash algorithm for $name: $hash_algo" >&2; return 1 ;; esac
+            test "$actual_size" = "$expected_size" || { echo "CNB size mismatch for $name" >&2; return 1; }
+            test "$actual_hash" = "$expected_hash" || { echo "CNB SHA-256 mismatch for $name" >&2; return 1; }
+          }
+          for file in dist/*; do verify_cnb_asset "$file"; done
+          printf '%s' "$release_id" > cnb-release-id
+      - name: Publish GitHub and CNB releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CNB_TOKEN: ${{ secrets.CNB_JKV_TOKEN }}
+          CNB_REPOSITORY: ${{ vars.CNB_JKV_REPOSITORY }}
+        run: |
+          api="https://api.cnb.cool/${CNB_REPOSITORY}/-/releases"
+          release_id="$(cat cnb-release-id)"
+          curl -fsS -X PATCH "$api/$release_id" \
+            -H "Authorization: Bearer $CNB_TOKEN" \
+            -H 'Accept: application/vnd.cnb.api+json' \
+            -H 'Content-Type: application/json' \
+            --data '{"draft":false,"make_latest":"false"}' >/dev/null
+          published="$(curl -fsS "$api/$release_id" -H "Authorization: Bearer $CNB_TOKEN" -H 'Accept: application/vnd.cnb.api+json')"
+          test "$(jq -er '.draft' <<<"$published")" = false
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+      - name: Verify public GitHub and CNB bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CNB_DOWNLOAD_BASE: ${{ vars.JKV_CN_DOWNLOAD_BASE }}
+        run: |
+          base="${CNB_DOWNLOAD_BASE%/}/${GITHUB_REF_NAME}"
+          mkdir github-public cnb-public
+          gh release download "$GITHUB_REF_NAME" --dir github-public --pattern '*'
+          for file in dist/*; do
+            name="$(basename "$file")"
+            cmp "$file" "github-public/$name"
+            curl -fsSL "$base/$name" -o "cnb-public/$name"
+            cmp "$file" "cnb-public/$name"
+          done
