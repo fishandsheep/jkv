@@ -498,7 +498,7 @@ func compatibleCatalogSnapshot(snapshot catalog.Snapshot) (catalog.Snapshot, err
 	if version == "dev" || versionAtLeast(version, snapshot.MinClientVersion) {
 		return snapshot, nil
 	}
-	return catalog.Snapshot{}, fmt.Errorf("Catalog 要求 jkv >= %s，当前为 %s；请升级 jkv", snapshot.MinClientVersion, version)
+	return catalog.Snapshot{}, fmt.Errorf("catalog 要求 jkv >= %s，当前为 %s；请升级 jkv", snapshot.MinClientVersion, version)
 }
 
 func versionAtLeast(current, minimum string) bool {
