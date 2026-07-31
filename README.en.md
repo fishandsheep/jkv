@@ -4,20 +4,20 @@
 
 A China-network-friendly, cross-platform version manager for JVM tools. It discovers releases from public official Chinese mirrors, verifies downloads when upstream checksums exist, installs side-by-side versions, and switches versions per shell or project.
 
-v0.2 is beta. Eclipse Temurin, Maven, and Gradle are core-supported. Other providers are beta.
+v0.3.0-beta.2 is the current beta. Eclipse Temurin, Maven, and Gradle are core-supported. Other providers are beta.
 
 ## Install
 
-Release notes provide the configured domestic URLs for `install.sh` and `install.ps1`. The installer downloads jkv itself from domestic object storage first and falls back to GitHub only after a transfer failure. A checksum mismatch is terminal and never triggers fallback.
+CNB Release is the domestic binary mirror. The installer downloads jkv from the matching CNB release tag first and falls back to GitHub only after a transfer failure. A checksum mismatch is terminal and never triggers fallback.
 
 Tool artifacts—JDKs, Maven, Gradle, and others—continue to come from their public official Chinese mirrors.
 
 ```sh
-curl -fsSL <domestic-script-url>/install.sh | sh
+curl -fsSL https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.3.0-beta.2/install.sh | sh
 ```
 
 ```powershell
-irm <domestic-script-url>/install.ps1 | iex
+irm https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.3.0-beta.2/install.ps1 | iex
 ```
 
 Supported shells: Bash, Zsh, Fish, and PowerShell. Supported targets: Linux, macOS, and Windows on amd64 and arm64 where the selected provider has an artifact.
