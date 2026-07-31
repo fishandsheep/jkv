@@ -52,6 +52,10 @@ func TestRemoteClientFetchesReleaseEndpointLayout(t *testing.T) {
 	if fetched.Endpoint != "test" || fetched.Snapshot.Sequence != 42 || fetched.Latest.ReleaseTag != "catalog-v1-000042" {
 		t.Fatalf("fetched = %#v", fetched)
 	}
+	releases := fetched.Snapshot.Releases("java", Platform{OS: "linux", Arch: "x64"})
+	if len(releases) == 0 || len(releases[0].AllowedRedirectHosts) != 1 || releases[0].AllowedRedirectHosts[0] != "cdn.example.invalid" {
+		t.Fatalf("release redirects = %#v", releases)
+	}
 }
 
 func TestRemoteClientFallsBackOnlyForDownloadFailure(t *testing.T) {

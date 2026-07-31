@@ -229,7 +229,7 @@ func (snapshot Snapshot) Releases(candidate string, platform Platform) []Release
 							if artifact.Checksum != nil {
 								checksumValue = artifact.Checksum.Value
 							}
-							out = append(out, Release{Candidate: candidate, Version: release.Selector, Vendor: vendor.Name, ArtifactID: artifact.ArtifactID, SupportTier: release.SupportTier, IntegrityLevel: integrity, URL: artifact.URL, ChecksumURL: checksumURL, ChecksumValue: checksumValue, Available: true, AvailabilityKnown: true, AvailabilityStatus: "catalog"})
+							out = append(out, Release{Candidate: candidate, Version: release.Selector, Vendor: vendor.Name, ArtifactID: artifact.ArtifactID, SupportTier: release.SupportTier, IntegrityLevel: integrity, URL: artifact.URL, AllowedRedirectHosts: append([]string(nil), artifact.AllowedRedirectHosts...), ChecksumURL: checksumURL, ChecksumValue: checksumValue, Available: true, AvailabilityKnown: true, AvailabilityStatus: "catalog"})
 							break
 						}
 					}

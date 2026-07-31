@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -431,6 +432,55 @@ func TestInstallStrictChecksumUsesCatalogDigest(t *testing.T) {
 	}
 }
 
+func TestCatalogArtifactRedirectsRequireApprovedHTTPSHost(t *testing.T) {
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	w, err := zw.Create("tool/bin/tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(w, "tool"); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(archive.Bytes())
+	}))
+	defer target.Close()
+	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		http.Redirect(w, request, target.URL+"/tool.zip", http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	allowedURL, err := url.Parse(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := catalog.Release{
+		Candidate:            "maven",
+		Version:              "1.0",
+		ArtifactID:           "catalog-artifact",
+		URL:                  redirect.URL + "/tool.zip",
+		AllowedRedirectHosts: []string{allowedURL.Host},
+	}
+	s := New(t.TempDir())
+	s.HTTP = redirect.Client()
+	if err := s.Install(context.Background(), release, io.Discard); err != nil {
+		t.Fatalf("approved redirect install = %v", err)
+	}
+
+	release.Version = "2.0"
+	release.AllowedRedirectHosts = nil
+	s = New(t.TempDir())
+	s.HTTP = redirect.Client()
+	err = s.Install(context.Background(), release, io.Discard)
+	if !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("unapproved redirect = %v", err)
+	}
+}
+
 func TestConcurrentInstallSameVersionIsSafe(t *testing.T) {
 	var archive bytes.Buffer
 	zw := zip.NewWriter(&archive)
@@ -638,6 +688,56 @@ func TestTrustedCatalogCacheRejectsInvalidState(t *testing.T) {
 	}
 	if _, err := s.LoadTrustedCatalog(); err == nil {
 		t.Fatal("future trusted catalog schema accepted")
+	}
+}
+
+func TestTrustedCatalogSaveRejectsConcurrentRollbackAndRewrite(t *testing.T) {
+	s := New(t.TempDir())
+	now := time.Now().UTC()
+	if err := s.SaveTrustedCatalog(TrustedCatalogState{HighestSequence: 10, Snapshots: []TrustedCatalogSnapshot{trustedSnapshotForTest(10, now)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveTrustedCatalog(TrustedCatalogState{HighestSequence: 9, Snapshots: []TrustedCatalogSnapshot{trustedSnapshotForTest(9, now)}}); err == nil {
+		t.Fatal("stale trusted catalog overwrite accepted")
+	}
+	rewritten := trustedSnapshotForTest(10, now)
+	rewritten.Snapshot = []byte("rewritten")
+	if err := s.SaveTrustedCatalog(TrustedCatalogState{HighestSequence: 10, Snapshots: []TrustedCatalogSnapshot{rewritten}}); err == nil {
+		t.Fatal("same sequence trusted catalog rewrite accepted")
+	}
+	state, err := s.LoadTrustedCatalog()
+	if err != nil || state.HighestSequence != 10 || string(state.Snapshots[0].Snapshot) != "snapshot-10" {
+		t.Fatalf("persisted trusted state = %#v, %v", state, err)
+	}
+}
+
+func TestCachedArchiveRejectsChangedCatalogChecksum(t *testing.T) {
+	s := New(t.TempDir())
+	release := catalog.Release{Candidate: "maven", Version: "3.9.11", URL: "https://example.test/maven.zip"}
+	archive, _, ok := s.archivePaths(release.Candidate, release.Version)
+	if !ok {
+		t.Fatal("archive path rejected")
+	}
+	if err := os.MkdirAll(filepath.Dir(archive), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := fileSHA256(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveArchiveMetadata(release, sum); err != nil {
+		t.Fatal(err)
+	}
+	release.ChecksumValue = strings.Repeat("0", 64)
+	if _, cached := s.validCachedArchive(release); cached {
+		t.Fatal("cached archive accepted after catalog checksum changed")
+	}
+	release.ChecksumValue = sum
+	if _, cached := s.validCachedArchive(release); !cached {
+		t.Fatal("cached archive rejected with matching catalog checksum")
 	}
 }
 

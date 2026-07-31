@@ -25,18 +25,19 @@ type Platform struct {
 }
 
 type Release struct {
-	Candidate          string `json:"candidate"`
-	Version            string `json:"version"`
-	Vendor             string `json:"vendor,omitempty"`
-	ArtifactID         string `json:"artifact_id,omitempty"`
-	SupportTier        string `json:"support_tier"`
-	IntegrityLevel     string `json:"integrity_level"`
-	URL                string `json:"url"`
-	ChecksumURL        string `json:"checksum_url,omitempty"`
-	ChecksumValue      string `json:"checksum_value,omitempty"`
-	Available          bool   `json:"available"`
-	AvailabilityKnown  bool   `json:"availability_known"`
-	AvailabilityStatus string `json:"availability_status"`
+	Candidate            string   `json:"candidate"`
+	Version              string   `json:"version"`
+	Vendor               string   `json:"vendor,omitempty"`
+	ArtifactID           string   `json:"artifact_id,omitempty"`
+	SupportTier          string   `json:"support_tier"`
+	IntegrityLevel       string   `json:"integrity_level"`
+	URL                  string   `json:"url"`
+	AllowedRedirectHosts []string `json:"allowed_redirect_hosts,omitempty"`
+	ChecksumURL          string   `json:"checksum_url,omitempty"`
+	ChecksumValue        string   `json:"checksum_value,omitempty"`
+	Available            bool     `json:"available"`
+	AvailabilityKnown    bool     `json:"availability_known"`
+	AvailabilityStatus   string   `json:"availability_status"`
 }
 
 type Candidate struct {

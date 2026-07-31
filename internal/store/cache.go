@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -68,6 +69,10 @@ func (s *Store) trustedCatalogPath() string {
 }
 
 func (s *Store) LoadTrustedCatalog() (TrustedCatalogState, error) {
+	return s.loadTrustedCatalog()
+}
+
+func (s *Store) loadTrustedCatalog() (TrustedCatalogState, error) {
 	b, err := os.ReadFile(s.trustedCatalogPath())
 	if err != nil {
 		return TrustedCatalogState{}, err
@@ -86,25 +91,88 @@ func (s *Store) LoadTrustedCatalog() (TrustedCatalogState, error) {
 }
 
 func (s *Store) SaveTrustedCatalog(state TrustedCatalogState) error {
-	state.SchemaVersion = stateSchemaVersion
-	state.Snapshots = append([]TrustedCatalogSnapshot(nil), state.Snapshots...)
-	sort.Slice(state.Snapshots, func(i, j int) bool { return state.Snapshots[i].Sequence > state.Snapshots[j].Sequence })
-	if len(state.Snapshots) > 3 {
-		state.Snapshots = state.Snapshots[:3]
-	}
-	if err := validateTrustedCatalogState(state); err != nil {
-		return err
-	}
 	lock, err := s.acquireLock(context.Background(), "trusted-catalog")
 	if err != nil {
 		return err
 	}
 	defer lock.release()
+	persisted, err := s.loadTrustedCatalog()
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	state, err = mergeTrustedCatalogState(persisted, state)
+	if err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
 	return atomicWrite(s.trustedCatalogPath(), append(b, '\n'), 0o600)
+}
+
+func mergeTrustedCatalogState(persisted, incoming TrustedCatalogState) (TrustedCatalogState, error) {
+	if incoming.HighestSequence < persisted.HighestSequence {
+		return TrustedCatalogState{}, fmt.Errorf("拒绝 trusted catalog 回滚：sequence %d 低于已见 %d", incoming.HighestSequence, persisted.HighestSequence)
+	}
+	bySequence := make(map[uint64]TrustedCatalogSnapshot, len(persisted.Snapshots)+len(incoming.Snapshots))
+	for _, snapshot := range persisted.Snapshots {
+		bySequence[snapshot.Sequence] = snapshot
+	}
+	seenIncoming := make(map[uint64]bool, len(incoming.Snapshots))
+	for _, snapshot := range incoming.Snapshots {
+		if seenIncoming[snapshot.Sequence] {
+			return TrustedCatalogState{}, fmt.Errorf("duplicate trusted catalog sequence %d", snapshot.Sequence)
+		}
+		seenIncoming[snapshot.Sequence] = true
+		if known, exists := bySequence[snapshot.Sequence]; exists && !sameTrustedSnapshot(known, snapshot) {
+			return TrustedCatalogState{}, fmt.Errorf("拒绝 trusted catalog：sequence %d 对应不同字节", snapshot.Sequence)
+		}
+		bySequence[snapshot.Sequence] = snapshot
+	}
+	state := TrustedCatalogState{SchemaVersion: stateSchemaVersion, HighestSequence: incoming.HighestSequence}
+	if persisted.HighestSequence > state.HighestSequence {
+		state.HighestSequence = persisted.HighestSequence
+	}
+	for _, snapshot := range bySequence {
+		state.Snapshots = append(state.Snapshots, snapshot)
+	}
+	sort.Slice(state.Snapshots, func(i, j int) bool { return state.Snapshots[i].Sequence > state.Snapshots[j].Sequence })
+	if len(state.Snapshots) > 3 {
+		state.Snapshots = state.Snapshots[:3]
+	}
+	state.Revocations = mergeTrustedRevocations(persisted.Revocations, incoming.Revocations)
+	if err := validateTrustedCatalogState(state); err != nil {
+		return TrustedCatalogState{}, err
+	}
+	return state, nil
+}
+
+func sameTrustedSnapshot(left, right TrustedCatalogSnapshot) bool {
+	return bytes.Equal(left.Snapshot, right.Snapshot) &&
+		bytes.Equal(left.SnapshotSignature, right.SnapshotSignature) &&
+		bytes.Equal(left.Latest, right.Latest) &&
+		bytes.Equal(left.LatestSignature, right.LatestSignature)
+}
+
+func mergeTrustedRevocations(existing, incoming []catalog.Revocation) []catalog.Revocation {
+	byID := make(map[string]catalog.Revocation, len(existing)+len(incoming))
+	for _, item := range existing {
+		byID[item.ArtifactID] = item
+	}
+	for _, item := range incoming {
+		byID[item.ArtifactID] = item
+	}
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]catalog.Revocation, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, byID[id])
+	}
+	return out
 }
 
 func (s *Store) ArtifactRevocation(artifactID string) (catalog.Revocation, bool, error) {
@@ -255,7 +323,13 @@ func (s *Store) validCachedArchive(r catalog.Release) (string, bool) {
 		return "", false
 	}
 	sum, err := fileSHA256(archive)
-	return archive, err == nil && strings.EqualFold(sum, metadata.SHA256)
+	if err != nil || !strings.EqualFold(sum, metadata.SHA256) {
+		return "", false
+	}
+	if r.ChecksumValue != "" && !strings.EqualFold(sum, r.ChecksumValue) {
+		return "", false
+	}
+	return archive, true
 }
 
 func (s *Store) saveArchiveMetadata(r catalog.Release, sum string) error {

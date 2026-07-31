@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -300,7 +301,7 @@ func (s *Store) obtainArchive(ctx context.Context, r catalog.Release, staging st
 		return "", err
 	}
 	tmpPath := filepath.Join(partialDir, "archive.partial")
-	sum, err := s.download(ctx, r.URL, tmpPath, progress)
+	sum, err := s.downloadRelease(ctx, r, tmpPath, progress)
 	if err != nil {
 		return "", err
 	}
@@ -358,13 +359,17 @@ func copyPath(src, dst string) error {
 }
 
 func (s *Store) download(ctx context.Context, rawURL, path string, progress io.Writer) (string, error) {
+	return s.downloadRelease(ctx, catalog.Release{URL: rawURL}, path, progress)
+}
+
+func (s *Store) downloadRelease(ctx context.Context, release catalog.Release, path string, progress io.Writer) (string, error) {
 	attempts := s.RetryMax
 	if attempts < 1 {
 		attempts = 1
 	}
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		sum, err := s.downloadAttempt(ctx, rawURL, path, progress)
+		sum, err := s.downloadAttempt(ctx, release, path, progress)
 		if err == nil {
 			return sum, nil
 		}
@@ -408,7 +413,7 @@ func retryableDownload(err error) bool {
 	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
-func (s *Store) downloadAttempt(ctx context.Context, rawURL, path string, progress io.Writer) (string, error) {
+func (s *Store) downloadAttempt(ctx context.Context, release catalog.Release, path string, progress io.Writer) (string, error) {
 	offset := int64(0)
 	if info, err := os.Stat(path); err == nil {
 		offset = info.Size()
@@ -417,7 +422,7 @@ func (s *Store) downloadAttempt(ctx context.Context, rawURL, path string, progre
 	}
 	requestCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, rawURL, nil)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, release.URL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -425,8 +430,11 @@ func (s *Store) downloadAttempt(ctx context.Context, rawURL, path string, progre
 	if offset > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
-	resp, err := s.HTTP.Do(req)
+	resp, err := s.downloadHTTPClient(release).Do(req)
 	if err != nil {
+		if errors.Is(err, ErrIntegrity) {
+			return "", err
+		}
 		return "", fmt.Errorf("%w: %v", ErrNetwork, err)
 	}
 	defer resp.Body.Close()
@@ -492,6 +500,31 @@ func (s *Store) downloadAttempt(ctx context.Context, rawURL, path string, progre
 		fmt.Fprintln(progress)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (s *Store) downloadHTTPClient(release catalog.Release) *http.Client {
+	client := s.HTTP
+	if client == nil {
+		client = http.DefaultClient
+	}
+	if release.ArtifactID == "" {
+		return client
+	}
+	copyClient := *client
+	allowed := map[string]bool{}
+	if source, err := url.Parse(release.URL); err == nil {
+		allowed[strings.ToLower(source.Host)] = true
+	}
+	for _, host := range release.AllowedRedirectHosts {
+		allowed[strings.ToLower(host)] = true
+	}
+	copyClient.CheckRedirect = func(request *http.Request, _ []*http.Request) error {
+		if request.URL.Scheme != "https" || !allowed[strings.ToLower(request.URL.Host)] {
+			return fmt.Errorf("%w: Catalog 制品重定向到未审核地址 %s", ErrIntegrity, request.URL.Redacted())
+		}
+		return nil
+	}
+	return &copyClient
 }
 
 type activityReader struct {
