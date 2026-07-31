@@ -3,9 +3,9 @@
 [![CI](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml/badge.svg)](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml)
 [![Mirror health](https://github.com/fishandsheep/jkv/actions/workflows/mirror-health.yml/badge.svg)](https://github.com/fishandsheep/jkv/actions/workflows/mirror-health.yml)
 
-面向国内网络的 JVM 工具版本管理器。思路接近 SDKMAN：在线列版本、下载解压、保存多版本、按终端或项目切换；区别是只接入可脚本化的国内稳定源，并原生支持 Linux、macOS、Windows。
+面向国内网络的 JVM 工具版本管理器。v0.3 起，版本清单来自独立、人工审核、Ed25519 签名的 Catalog；工具归档仍从各自公共国内源下载。jkv 不下载或执行远端 Provider、插件、脚本。
 
-> v0.2 当前为 beta。Temurin、Maven、Gradle 属于 core 支持；其他 provider 属于 beta。参见[支持政策](docs/support.md)。
+> 当前公开安装包是 `v0.2.0-beta.2`。`v0.3` 发布包会内置 Catalog 公钥，默认使用 CNB Catalog、网络故障时回退 GitHub Catalog；验签、哈希、schema 或防回滚失败绝不回退到未签名数据。参见[支持政策](docs/support.md)。
 
 [English](README.en.md) · [命令参考](docs/commands.md) · [故障排查](docs/troubleshooting.md) · [安全政策](SECURITY.md)
 
@@ -19,25 +19,25 @@
 | Java / Dragonwell、BiSheng | beta | 阿里 OSS / 华为云 | 见版本 | — | 见版本 |
 | Ant、Groovy、JMeter、Tomcat、Spring Boot CLI | beta | 阿里云镜像 | ✓ | ✓ | ✓ |
 
-版本从镜像目录或官方元数据实时发现，不在客户端写死。Dragonwell 官方元数据偶发不可用时，客户端回退到内置的最近已知官方 OSS 坐标。
+v0.3 的版本、URL、平台和支持等级由签名 Catalog 决定；`jkv list/install` 不再实时解析镜像目录。旧实时 Provider 仅在迁移期开启 `JKV_LEGACY_PROVIDER=true` 时使用。
 
 ## 快速开始
 
-Linux / macOS：
+Linux / macOS，当前公开 beta：
 
 ```sh
-curl -fsSL <JKV_CN_DOWNLOAD_BASE>/beta/install.sh | sh
+curl -fsSL https://github.com/fishandsheep/jkv/releases/download/v0.2.0-beta.2/install.sh | sh
 ```
 
-Windows PowerShell：
+Windows PowerShell，当前公开 beta：
 
 ```powershell
-irm <JKV_CN_DOWNLOAD_BASE>/beta/install.ps1 | iex
+irm https://github.com/fishandsheep/jkv/releases/download/v0.2.0-beta.2/install.ps1 | iex
 ```
 
-正式发布页会给出已配置的国内安装脚本地址。安装器优先从国内对象存储下载 jkv 本身；仅在传输失败或校验文件不可用时回退 GitHub。JDK、Maven、Gradle 等工具介质始终来自各自公共官方国内镜像。每个 jkv 二进制都强制校验 SHA-256；校验不匹配不会切换来源。
+国内对象存储配置完成后，Linux/macOS 使用 `https://<国内域名>/beta/install.sh`，PowerShell 使用同路径 `install.ps1`；URL 只替换域名部分。安装器优先下载国内 jkv 二进制，传输失败时回退 GitHub。JDK、Maven、Gradle 等工具介质始终来自 Catalog 指定的公共国内源。每个 jkv 二进制都校验 SHA-256；校验不匹配不会切换来源。
 
-固定版本入口为 `<JKV_CN_DOWNLOAD_BASE>/v0.2.0-beta.1/install.sh`（PowerShell 对应 `.ps1`）；`beta/` 是便捷指针。GitHub 固定版本入口为 `https://github.com/fishandsheep/jkv/releases/download/v0.2.0-beta.1/install.sh`。未配置国内地址时，发布仍正常进行，生成的安装脚本直接使用同一 Tag 的 GitHub 资产；以后配置国内地址即可自动切换为国内优先。
+固定版本入口为 `https://github.com/fishandsheep/jkv/releases/download/<tag>/install.sh`；PowerShell 将文件名换成 `install.ps1`。`beta/` 是国内便捷指针。未配置国内地址时，发布仍正常进行，安装脚本直接使用同一 Tag 的 GitHub 资产。
 
 默认安装到 `~/.jkv`，无需 Go 或管理员权限。重新打开终端后验证：
 
@@ -113,6 +113,47 @@ jkv env clear         # 恢复默认版本
 java=21.0.11+10-tem
 maven=3.9.16
 ```
+
+## v0.3 Catalog 使用与验证
+
+v0.3 发布二进制内置 Catalog 公钥和两个固定端点：CNB 为首选，GitHub Release 为网络故障后备。客户端先验证签名 `latest.json`，再按其 SHA-256 和签名验证不可变 Snapshot；已接受过更高 `sequence` 后，自动更新会拒绝旧 Snapshot。
+
+正常用户无需设置 Catalog 环境变量：
+
+```sh
+jkv version
+jkv list java --refresh
+jkv install java 21-tem --default
+jkv doctor --json
+```
+
+`jkv doctor --json` 的 `catalog_trust` 会显示当前 Snapshot sequence、年龄、端点、验证 key ID 和累计撤销数。首次访问无可信缓存且 Catalog 不可达会明确失败；已有可信缓存时离线仍可 `list` 和安装已列出的版本。
+
+开发、预发布或自建镜像可覆盖公开参数：
+
+```sh
+export JKV_EXPERIMENTAL_CATALOG=true
+export JKV_CATALOG_KEY_ID='catalog-2026-a'
+export JKV_CATALOG_PUBLIC_KEY='<base64-ed25519-public-key>'
+export JKV_CATALOG_ENDPOINT='https://catalog.example.cn/releases/download'
+export JKV_CATALOG_FALLBACK_ENDPOINT='https://github.com/fishandsheep/jkv-catalog/releases/download'
+jkv list java --refresh
+```
+
+`JKV_CATALOG_ENDPOINT` 是 Release download 根，不是 `latest.json` 文件 URL。客户端固定请求：
+
+```text
+<root>/catalog-latest/latest.json
+<root>/catalog-v1-000001/catalog-v1.json
+```
+
+仅迁移排障时设置 `JKV_LEGACY_PROVIDER=true`；它放弃 Catalog 的审核、撤销和防回滚保护，不应作为日常配置。
+
+## 新版本与新工具如何进入 jkv
+
+用户不能通过本机命令向 Catalog 注入 URL 或脚本。新增版本和工具走 [jkv-catalog](https://github.com/fishandsheep/jkv-catalog) 的受审 PR：Provider 发现候选数据，维护者审核 `data/catalog-input.json`，合并后手动发布新签名 Snapshot。
+
+新 Candidate 仅支持通用 ZIP、`tar.gz` 或 `tgz` 归档，并要求解压后存在单一根目录和 `bin/`。Catalog 条目必须声明稳定 `artifact_id`、HTTPS 直链、平台、archive type、selector、support tier；不能包含 shell、JavaScript、安装后脚本、绝对路径或任意环境变量。需要特殊安装布局时，先在 jkv 客户端增加受限能力，再发布 Catalog 数据。
 
 ## Maven / Gradle 依赖镜像
 

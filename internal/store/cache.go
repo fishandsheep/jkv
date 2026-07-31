@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +22,28 @@ type CatalogCache struct {
 	FetchedAt     time.Time         `json:"fetched_at"`
 	CheckedAt     time.Time         `json:"checked_at,omitempty"`
 	Releases      []catalog.Release `json:"releases"`
+}
+
+// TrustedCatalogSnapshot stores exact signed bytes after client verification.
+// The current snapshot and two predecessors remain available for offline use.
+type TrustedCatalogSnapshot struct {
+	Sequence          uint64    `json:"sequence"`
+	Endpoint          string    `json:"endpoint"`
+	FetchedAt         time.Time `json:"fetched_at"`
+	KeyIDs            []string  `json:"key_ids"`
+	Snapshot          []byte    `json:"snapshot"`
+	SnapshotSignature []byte    `json:"snapshot_signature"`
+	Latest            []byte    `json:"latest"`
+	LatestSignature   []byte    `json:"latest_signature"`
+}
+
+// TrustedCatalogState is separate from disposable per-candidate catalog cache.
+// HighestSequence and cumulative revocations survive cache cleanup.
+type TrustedCatalogState struct {
+	SchemaVersion   int                      `json:"schema_version"`
+	HighestSequence uint64                   `json:"highest_sequence"`
+	Snapshots       []TrustedCatalogSnapshot `json:"snapshots"`
+	Revocations     []catalog.Revocation     `json:"revocations,omitempty"`
 }
 
 type archiveMetadata struct {
@@ -37,6 +61,94 @@ func (s *Store) cacheRoot() string { return filepath.Join(s.Root, "cache") }
 
 func (s *Store) catalogCachePath(p catalog.Platform, candidate string) string {
 	return filepath.Join(s.cacheRoot(), "catalog", p.OS+"-"+p.Arch, candidate+".json")
+}
+
+func (s *Store) trustedCatalogPath() string {
+	return filepath.Join(s.cacheRoot(), "trusted-catalog.json")
+}
+
+func (s *Store) LoadTrustedCatalog() (TrustedCatalogState, error) {
+	b, err := os.ReadFile(s.trustedCatalogPath())
+	if err != nil {
+		return TrustedCatalogState{}, err
+	}
+	var state TrustedCatalogState
+	if err := json.Unmarshal(b, &state); err != nil {
+		return TrustedCatalogState{}, err
+	}
+	if state.SchemaVersion > stateSchemaVersion {
+		return TrustedCatalogState{}, fmt.Errorf("不支持 trusted catalog schema %d", state.SchemaVersion)
+	}
+	if err := validateTrustedCatalogState(state); err != nil {
+		return TrustedCatalogState{}, err
+	}
+	return state, nil
+}
+
+func (s *Store) SaveTrustedCatalog(state TrustedCatalogState) error {
+	state.SchemaVersion = stateSchemaVersion
+	state.Snapshots = append([]TrustedCatalogSnapshot(nil), state.Snapshots...)
+	sort.Slice(state.Snapshots, func(i, j int) bool { return state.Snapshots[i].Sequence > state.Snapshots[j].Sequence })
+	if len(state.Snapshots) > 3 {
+		state.Snapshots = state.Snapshots[:3]
+	}
+	if err := validateTrustedCatalogState(state); err != nil {
+		return err
+	}
+	lock, err := s.acquireLock(context.Background(), "trusted-catalog")
+	if err != nil {
+		return err
+	}
+	defer lock.release()
+	b, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(s.trustedCatalogPath(), append(b, '\n'), 0o600)
+}
+
+func (s *Store) ArtifactRevocation(artifactID string) (catalog.Revocation, bool, error) {
+	if artifactID == "" {
+		return catalog.Revocation{}, false, nil
+	}
+	state, err := s.LoadTrustedCatalog()
+	if os.IsNotExist(err) {
+		return catalog.Revocation{}, false, nil
+	}
+	if err != nil {
+		return catalog.Revocation{}, false, err
+	}
+	for _, revocation := range state.Revocations {
+		if revocation.ArtifactID == artifactID {
+			return revocation, true, nil
+		}
+	}
+	return catalog.Revocation{}, false, nil
+}
+
+func validateTrustedCatalogState(state TrustedCatalogState) error {
+	if len(state.Snapshots) > 3 {
+		return errors.New("trusted catalog stores at most three snapshots")
+	}
+	seen := map[uint64]bool{}
+	var max uint64
+	for _, snapshot := range state.Snapshots {
+		if snapshot.Sequence == 0 || snapshot.Endpoint == "" || snapshot.FetchedAt.IsZero() ||
+			len(snapshot.Snapshot) == 0 || len(snapshot.SnapshotSignature) == 0 || len(snapshot.Latest) == 0 || len(snapshot.LatestSignature) == 0 {
+			return errors.New("invalid trusted catalog snapshot")
+		}
+		if seen[snapshot.Sequence] {
+			return fmt.Errorf("duplicate trusted catalog sequence %d", snapshot.Sequence)
+		}
+		seen[snapshot.Sequence] = true
+		if snapshot.Sequence > max {
+			max = snapshot.Sequence
+		}
+	}
+	if max > state.HighestSequence {
+		return errors.New("trusted catalog highest sequence is lower than a stored snapshot")
+	}
+	return nil
 }
 
 func (s *Store) LoadCatalog(p catalog.Platform, candidate string) (CatalogCache, error) {

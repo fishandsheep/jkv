@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,67 +11,191 @@ import (
 	"strings"
 )
 
-// RemoteClient downloads only fixed Catalog v1 paths, then verifies original bytes.
-// Endpoint must be a trusted distribution base URL, never data-controlled.
+// Endpoint maps trusted fixed release URLs. Catalog data never controls either URL.
+// LatestURL points to catalog-latest/latest.json; ReleaseBaseURL points to the
+// directory containing immutable release tags.
+type Endpoint struct {
+	Name           string
+	LatestURL      string
+	ReleaseBaseURL string
+}
+
+// ReleaseEndpoint builds an adapter for GitHub/CNB Release download URLs.
+func ReleaseEndpoint(name, baseURL string) Endpoint {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return Endpoint{
+		Name:           name,
+		LatestURL:      baseURL + "/catalog-latest/latest.json",
+		ReleaseBaseURL: baseURL,
+	}
+}
+
+// FetchedSnapshot preserves verified original bytes for trusted local storage.
+type FetchedSnapshot struct {
+	Endpoint          string
+	KeyIDs            []string
+	Snapshot          Snapshot
+	Latest            Latest
+	SnapshotBytes     []byte
+	SnapshotSignature []byte
+	LatestBytes       []byte
+	LatestSignature   []byte
+}
+
+// DownloadError permits endpoint fallback only for transport or HTTP failure.
+// Signature, hash, schema, and endpoint-configuration errors are never safe to
+// hide by trying another endpoint.
+type DownloadError struct {
+	Endpoint string
+	URL      string
+	Err      error
+}
+
+func (err *DownloadError) Error() string {
+	return fmt.Sprintf("download catalog from %s: %v", err.Endpoint, err.Err)
+}
+
+func (err *DownloadError) Unwrap() error { return err.Err }
+
+// RemoteClient downloads only trusted fixed Catalog v1 paths, then verifies
+// original bytes. Endpoints are attempted in order. Endpoint is retained for
+// backward-compatible single-root test deployments.
 type RemoteClient struct {
 	Endpoint    string
+	Endpoints   []Endpoint
 	HTTP        *http.Client
 	TrustedKeys map[string]ed25519.PublicKey
 }
 
 func (client RemoteClient) Fetch(ctx context.Context) (Snapshot, error) {
-	if len(client.TrustedKeys) == 0 {
-		return Snapshot{}, fmt.Errorf("catalog trust root is not configured")
+	fetched, err := client.FetchDocument(ctx)
+	if err != nil {
+		return Snapshot{}, err
 	}
-	base, err := url.Parse(client.Endpoint)
-	if err != nil || base.Scheme != "https" || base.Host == "" {
-		return Snapshot{}, fmt.Errorf("invalid catalog endpoint")
+	return fetched.Snapshot, nil
+}
+
+// FetchDocument returns one verified Snapshot and its original signed bytes.
+func (client RemoteClient) FetchDocument(ctx context.Context) (FetchedSnapshot, error) {
+	if len(client.TrustedKeys) == 0 {
+		return FetchedSnapshot{}, fmt.Errorf("catalog trust root is not configured")
+	}
+	endpoints := append([]Endpoint(nil), client.Endpoints...)
+	if client.Endpoint != "" {
+		endpoints = append(endpoints, rootEndpoint(client.Endpoint))
+	}
+	if len(endpoints) == 0 {
+		return FetchedSnapshot{}, fmt.Errorf("catalog endpoint is not configured")
 	}
 	if client.HTTP == nil {
 		client.HTTP = http.DefaultClient
 	}
-	latest, err := client.get(ctx, base, "latest.json", maxLatestBytes)
-	if err != nil {
-		return Snapshot{}, err
+	var failures []error
+	for _, endpoint := range endpoints {
+		fetched, err := client.fetchEndpoint(ctx, endpoint)
+		if err == nil {
+			return fetched, nil
+		}
+		var download *DownloadError
+		if !errors.As(err, &download) {
+			return FetchedSnapshot{}, err
+		}
+		failures = append(failures, err)
 	}
-	latestSig, err := client.get(ctx, base, "latest.json.sig", maxEnvelopeBytes)
-	if err != nil {
-		return Snapshot{}, err
+	return FetchedSnapshot{}, fmt.Errorf("download catalog from every endpoint: %w", errors.Join(failures...))
+}
+
+func rootEndpoint(baseURL string) Endpoint {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return Endpoint{
+		Name:           baseURL,
+		LatestURL:      baseURL + "/latest.json",
+		ReleaseBaseURL: baseURL + "/releases",
 	}
-	pointer, _, err := VerifyLatest(latest, latestSig, client.TrustedKeys)
+}
+
+func (client RemoteClient) fetchEndpoint(ctx context.Context, endpoint Endpoint) (FetchedSnapshot, error) {
+	latestURL, err := trustedURL(endpoint.LatestURL)
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("verify latest: %w", err)
+		return FetchedSnapshot{}, fmt.Errorf("invalid catalog endpoint %q: %w", endpoint.Name, err)
 	}
-	prefix := "releases/" + pointer.ReleaseTag + "/"
-	snapshot, err := client.get(ctx, base, prefix+pointer.SnapshotAsset, maxSnapshotBytes)
+	releaseBase, err := trustedURL(endpoint.ReleaseBaseURL)
 	if err != nil {
-		return Snapshot{}, err
+		return FetchedSnapshot{}, fmt.Errorf("invalid catalog endpoint %q: %w", endpoint.Name, err)
 	}
-	snapshotSig, err := client.get(ctx, base, prefix+pointer.SnapshotAsset+".sig", maxEnvelopeBytes)
+	name := endpoint.Name
+	if name == "" {
+		name = latestURL.Host
+	}
+	latest, err := client.getURL(ctx, name, latestURL, maxLatestBytes)
 	if err != nil {
-		return Snapshot{}, err
+		return FetchedSnapshot{}, err
+	}
+	latestSig, err := client.getURL(ctx, name, appendSuffix(latestURL, ".sig"), maxEnvelopeBytes)
+	if err != nil {
+		return FetchedSnapshot{}, err
+	}
+	pointer, verification, err := VerifyLatest(latest, latestSig, client.TrustedKeys)
+	if err != nil {
+		return FetchedSnapshot{}, fmt.Errorf("verify latest from %s: %w", name, err)
+	}
+	snapshotURL := appendPath(releaseBase, "/"+pointer.ReleaseTag+"/"+pointer.SnapshotAsset)
+	snapshot, err := client.getURL(ctx, name, snapshotURL, maxSnapshotBytes)
+	if err != nil {
+		return FetchedSnapshot{}, err
+	}
+	snapshotSig, err := client.getURL(ctx, name, appendSuffix(snapshotURL, ".sig"), maxEnvelopeBytes)
+	if err != nil {
+		return FetchedSnapshot{}, err
 	}
 	value, err := VerifyLatestSnapshot(latest, latestSig, snapshot, snapshotSig, client.TrustedKeys)
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("verify snapshot: %w", err)
+		return FetchedSnapshot{}, fmt.Errorf("verify snapshot from %s: %w", name, err)
 	}
-	return value, nil
+	return FetchedSnapshot{
+		Endpoint:          name,
+		KeyIDs:            verification.KeyIDs,
+		Snapshot:          value,
+		Latest:            pointer,
+		SnapshotBytes:     snapshot,
+		SnapshotSignature: snapshotSig,
+		LatestBytes:       latest,
+		LatestSignature:   latestSig,
+	}, nil
 }
 
-func (client RemoteClient) get(ctx context.Context, base *url.URL, path string, limit int) ([]byte, error) {
+func trustedURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("must be an absolute HTTPS URL without credentials, query, or fragment")
+	}
+	return parsed, nil
+}
+
+func appendPath(base *url.URL, suffix string) *url.URL {
 	target := *base
-	target.Path = strings.TrimRight(base.Path, "/") + "/" + path
+	target.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(suffix, "/")
+	return &target
+}
+
+func appendSuffix(base *url.URL, suffix string) *url.URL {
+	target := *base
+	target.Path += suffix
+	return &target
+}
+
+func (client RemoteClient) getURL(ctx context.Context, endpoint string, target *url.URL, limit int) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 	response, err := client.HTTP.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("download catalog: %w", err)
+		return nil, &DownloadError{Endpoint: endpoint, URL: target.String(), Err: err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download catalog: HTTP %s", response.Status)
+		return nil, &DownloadError{Endpoint: endpoint, URL: target.String(), Err: fmt.Errorf("HTTP %s", response.Status)}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 	if err != nil {
@@ -94,7 +219,17 @@ func (snapshot Snapshot) Releases(candidate string, platform Platform) []Release
 				for _, artifact := range release.Artifacts {
 					for _, applicable := range artifact.Platforms {
 						if applicable == platform {
-							out = append(out, Release{Candidate: candidate, Version: release.Selector, Vendor: vendor.Name, SupportTier: release.SupportTier, IntegrityLevel: "https-only", URL: artifact.URL, Available: true, AvailabilityKnown: true, AvailabilityStatus: "catalog"})
+							integrity := "https-only"
+							checksumURL := ""
+							if artifact.Checksum != nil {
+								integrity = "checksum"
+								checksumURL = artifact.Checksum.SourceURL
+							}
+							checksumValue := ""
+							if artifact.Checksum != nil {
+								checksumValue = artifact.Checksum.Value
+							}
+							out = append(out, Release{Candidate: candidate, Version: release.Selector, Vendor: vendor.Name, ArtifactID: artifact.ArtifactID, SupportTier: release.SupportTier, IntegrityLevel: integrity, URL: artifact.URL, ChecksumURL: checksumURL, ChecksumValue: checksumValue, Available: true, AvailabilityKnown: true, AvailabilityStatus: "catalog"})
 							break
 						}
 					}
