@@ -578,6 +578,83 @@ func TestCatalogCacheAndClean(t *testing.T) {
 	}
 }
 
+func TestTrustedCatalogCacheKeepsSnapshotsAndRevocations(t *testing.T) {
+	s := New(t.TempDir())
+	now := time.Now().UTC().Round(time.Second)
+	state := TrustedCatalogState{
+		HighestSequence: 4,
+		Snapshots: []TrustedCatalogSnapshot{
+			trustedSnapshotForTest(2, now.Add(-2*time.Hour)),
+			trustedSnapshotForTest(4, now),
+			trustedSnapshotForTest(1, now.Add(-3*time.Hour)),
+			trustedSnapshotForTest(3, now.Add(-time.Hour)),
+		},
+		Revocations: []catalog.Revocation{{ArtifactID: "bad-artifact", Reason: "compromised", RevokedAt: "2026-07-31T00:00:00Z"}},
+	}
+	if err := s.SaveTrustedCatalog(state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.LoadTrustedCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SchemaVersion != stateSchemaVersion || loaded.HighestSequence != 4 || len(loaded.Snapshots) != 3 || loaded.Snapshots[0].Sequence != 4 {
+		t.Fatalf("trusted state = %#v", loaded)
+	}
+	revocation, revoked, err := s.ArtifactRevocation("bad-artifact")
+	if err != nil || !revoked || revocation.Reason != "compromised" {
+		t.Fatalf("revocation = %#v, %t, %v", revocation, revoked, err)
+	}
+	if _, revoked, err := s.ArtifactRevocation("unknown"); err != nil || revoked {
+		t.Fatalf("unknown revocation = %t, %v", revoked, err)
+	}
+	if _, revoked, err := s.ArtifactRevocation(""); err != nil || revoked {
+		t.Fatalf("empty revocation = %t, %v", revoked, err)
+	}
+	if _, err := s.CleanCache("catalog", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadTrustedCatalog(); err != nil {
+		t.Fatalf("catalog clean removed trusted state: %v", err)
+	}
+}
+
+func TestTrustedCatalogCacheRejectsInvalidState(t *testing.T) {
+	s := New(t.TempDir())
+	now := time.Now().UTC()
+	invalid := TrustedCatalogState{HighestSequence: 1, Snapshots: []TrustedCatalogSnapshot{
+		trustedSnapshotForTest(1, now),
+		trustedSnapshotForTest(1, now),
+	}}
+	if err := s.SaveTrustedCatalog(invalid); err == nil {
+		t.Fatal("duplicate trusted snapshot accepted")
+	}
+	path := s.trustedCatalogPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":999}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadTrustedCatalog(); err == nil {
+		t.Fatal("future trusted catalog schema accepted")
+	}
+}
+
+func trustedSnapshotForTest(sequence uint64, fetchedAt time.Time) TrustedCatalogSnapshot {
+	data := []byte(fmt.Sprintf("snapshot-%d", sequence))
+	return TrustedCatalogSnapshot{
+		Sequence:          sequence,
+		Endpoint:          "test",
+		FetchedAt:         fetchedAt,
+		KeyIDs:            []string{"test-key"},
+		Snapshot:          data,
+		SnapshotSignature: append([]byte("signature-"), data...),
+		Latest:            append([]byte("latest-"), data...),
+		LatestSignature:   append([]byte("latest-signature-"), data...),
+	}
+}
+
 func TestRejectsFutureStateSchemas(t *testing.T) {
 	s := New(t.TempDir())
 	p := catalog.Platform{OS: "linux", Arch: "x64"}
