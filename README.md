@@ -1,5 +1,9 @@
 # jkv
 
+<p align="center">
+  <img src="img/logo.svg" alt="jkv logo" width="180">
+</p>
+
 [![CI](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml/badge.svg)](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml)
 
 中国网络友好、跨平台 JVM 工具版本管理器。用一个命令安装、切换和固定 Java、Maven、Gradle 等工具版本。
