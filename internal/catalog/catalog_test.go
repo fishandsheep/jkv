@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -79,6 +80,7 @@ func TestProvidersLive(t *testing.T) {
 }
 
 func TestCheckAvailability(t *testing.T) {
+	var flakyCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/ok":
@@ -94,6 +96,12 @@ func TestCheckAvailability(t *testing.T) {
 			w.WriteHeader(http.StatusPartialContent)
 		case "/missing":
 			w.WriteHeader(http.StatusNotFound)
+		case "/flaky":
+			if flakyCalls.Add(1) <= 2 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
 		}
 	}))
 	defer server.Close()
@@ -102,13 +110,14 @@ func TestCheckAvailability(t *testing.T) {
 		{URL: server.URL + "/ok"},
 		{URL: server.URL + "/range"},
 		{URL: server.URL + "/missing"},
+		{URL: server.URL + "/flaky"},
 	}
 	got := (&Client{HTTP: server.Client()}).CheckAvailability(context.Background(), releases)
-	if !got[0].Available || !got[1].Available || got[2].Available {
+	if !got[0].Available || !got[1].Available || got[2].Available || !got[3].Available {
 		t.Fatalf("availability = %#v", got)
 	}
 	if got[0].AvailabilityStatus != "available" || got[1].AvailabilityStatus != "available" ||
-		got[2].AvailabilityStatus != "missing" {
+		got[2].AvailabilityStatus != "missing" || got[3].AvailabilityStatus != "available" {
 		t.Fatalf("availability status = %#v", got)
 	}
 	for _, release := range got {

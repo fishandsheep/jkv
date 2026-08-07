@@ -73,6 +73,11 @@ type Client struct {
 
 var ErrNetwork = errors.New("镜像网络错误")
 
+const (
+	availabilityAttempts   = 3
+	availabilityRetryDelay = 250 * time.Millisecond
+)
+
 func NewClient() *Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 30 * time.Second
@@ -219,22 +224,38 @@ func (c *Client) downloadAvailability(ctx context.Context, rawURL string) string
 		resp.Body.Close()
 		return resp.StatusCode, nil
 	}
-	status, err := check(http.MethodHead, false)
-	if err == nil && status >= 200 && status < 400 {
-		return "available"
-	}
-	if err == nil && status != http.StatusForbidden && status != http.StatusMethodNotAllowed && status != http.StatusNotImplemented {
-		return "missing"
-	}
-	status, err = check(http.MethodGet, true)
-	if err != nil {
-		return "unreachable"
-	}
-	if status >= 200 && status < 400 {
-		return "available"
-	}
-	if status == http.StatusNotFound || status == http.StatusGone {
-		return "missing"
+	for attempt := 0; attempt < availabilityAttempts; attempt++ {
+		status, err := check(http.MethodHead, false)
+		if err == nil {
+			if status >= 200 && status < 400 {
+				return "available"
+			}
+			if status == http.StatusNotFound || status == http.StatusGone {
+				return "missing"
+			}
+			if status != http.StatusForbidden && status != http.StatusMethodNotAllowed &&
+				status != http.StatusNotImplemented && status < 500 {
+				return "missing"
+			}
+		}
+		status, err = check(http.MethodGet, true)
+		if err == nil {
+			if status >= 200 && status < 400 {
+				return "available"
+			}
+			if status == http.StatusNotFound || status == http.StatusGone {
+				return "missing"
+			}
+		}
+		if attempt+1 < availabilityAttempts {
+			timer := time.NewTimer(availabilityRetryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return "unreachable"
+			case <-timer.C:
+			}
+		}
 	}
 	return "unreachable"
 }
