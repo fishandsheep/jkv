@@ -336,6 +336,30 @@ func TestRunCurrentJSON(t *testing.T) {
 	}
 }
 
+func TestRunVersionUsesBuildValue(t *testing.T) {
+	original := version
+	defer func() { version = original }()
+
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "release", value: "v0.0.1", want: "jkv v0.0.1\n"},
+		{name: "source", value: "dev", want: "jkv dev\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			version = test.value
+			output := captureStdout(t, func() error {
+				return run(context.Background(), []string{"v"})
+			})
+			if output != test.want {
+				t.Fatalf("version output = %q, want %q", output, test.want)
+			}
+		})
+	}
+}
+
 func TestReadEnvFileRejectsPathSegments(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".jkvrc")
 	if err := os.WriteFile(path, []byte("java=../../../tmp/tool\n"), 0o600); err != nil {

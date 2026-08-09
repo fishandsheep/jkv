@@ -26,7 +26,7 @@ import (
 
 var version = "dev"
 
-// Release workflow injects these public values for v0.3 binaries. Environment
+// Release workflow injects these public values into release binaries. Environment
 // values remain available for development and emergency endpoint migration.
 var (
 	catalogKeyID              = ""
@@ -174,7 +174,7 @@ func optionsFromContext(ctx context.Context) cliOptions {
 }
 
 func usage() {
-	fmt.Print(`jkv - 中国网络友好、跨平台 JVM 工具版本管理器
+	fmt.Print(`jkv (Java Kit Version) - 中国网络友好、跨平台 Java 生态及开发者工具版本管理器
 
 用法:
   jkv list|ls [candidate] [--refresh]  列出工具或在线版本

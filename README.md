@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml/badge.svg)](https://github.com/fishandsheep/jkv/actions/workflows/ci.yml)
 
-中国网络友好、跨平台 JVM 工具版本管理器。用一个命令安装、切换和固定 Java、Maven、Gradle 等工具版本。
+jkv (Java Kit Version) 是中国网络友好、跨平台的 Java 生态及开发者工具版本管理器。用一个命令安装、切换和固定 Java、Maven、Gradle、Ant、Groovy、JMeter、Tomcat、Spring Boot CLI 等工具版本。
 
 [English](README.en.md) · [完整命令](docs/commands.md) · [故障排查](docs/troubleshooting.md) · [安全政策](SECURITY.md)
 
@@ -16,26 +16,27 @@
 - 同一工具可并存多个版本；按当前终端、默认环境或项目 `.jkvrc` 选择版本。
 - 下载时校验 SHA-256；安全解压且不覆盖已有安装。
 - Maven、Gradle 可生成国内依赖镜像配置，不覆盖已有用户配置。
+- 支持工具：Java、Maven、Gradle、Ant、Groovy、JMeter、Tomcat、Spring Boot CLI。
 
-当前公开 beta 为 [`v0.3.0-beta.2`](https://github.com/fishandsheep/jkv/releases/tag/v0.3.0-beta.2)。Java（Temurin）、Maven、Gradle 为 core 支持；其他工具为 beta，实际可用版本以 `jkv list` 为准。
+当前发布版本为 [`v0.0.1`](https://github.com/fishandsheep/jkv/releases/tag/v0.0.1)。Java（Temurin）、Maven、Gradle 为 core 支持；Dragonwell、BiSheng、Ant、Groovy、JMeter、Tomcat、Spring Boot CLI 为 beta，实际可用版本以 `jkv list` 为准。
 
 ## 快速开始
 
 Linux / macOS：
 
 ```sh
-curl -fsSL https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.3.0-beta.2/install.sh | sh
+curl -fsSL https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.0.1/install.sh | sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.3.0-beta.2/install.ps1 | iex
+irm https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.0.1/install.ps1 | iex
 ```
 
 安装器优先从 CNB 下载同一版本二进制，传输失败才回退 GitHub；校验和不匹配会直接失败。工具包仍从 Catalog 审核过的公共源直连下载。
 
-也可下载 [Release](https://github.com/fishandsheep/jkv/releases/latest) 对应系统与架构的二进制，或运行 `go install github.com/fishandsheep/jkv/cmd/jkv@v0.3.0-beta.2`。工具默认安装到 `~/.jkv`；用 `JKV_DIR` 可改位置。
+也可下载 [Release](https://github.com/fishandsheep/jkv/releases/latest) 对应系统与架构的二进制，或运行 `go install github.com/fishandsheep/jkv/cmd/jkv@v0.0.1`。工具默认安装到 `~/.jkv`；用 `JKV_DIR` 可改位置。
 
 首次切换版本前加载 shell hook（将 `zsh` 换成你的 shell）：
 
@@ -89,15 +90,15 @@ jkv mirror status
 
 `jkv` 负责本机下载、校验、解压和切换；[jkv-catalog](https://github.com/fishandsheep/jkv-catalog) 负责审核版本、平台、下载地址和校验信息。
 
-v0.3 消费已签名 Catalog Snapshot：正常使用 `jkv list`、`jkv install` 即可，网络临时故障时继续使用本机可信缓存。Catalog 不执行 Provider、插件或安装脚本；工具归档仍从审核过的公共源直连下载。协议、安全边界和迁移说明见 [Catalog 使用说明](docs/catalog.md)。
+v0.0.1 消费已签名 Catalog Snapshot：正常使用 `jkv list`、`jkv install` 即可，网络临时故障时继续使用本机可信缓存。Catalog 不执行 Provider、插件或安装脚本；工具归档仍从审核过的公共源直连下载。协议、安全边界和迁移说明见 [Catalog 使用说明](docs/catalog.md)。
 
 想补充版本或工具？到 [jkv-catalog](https://github.com/fishandsheep/jkv-catalog) 提交数据 PR；步骤见其 README。
 
 ## 未来计划
 
-代码已具备 v0.3 签名 Catalog 的核心链路：客户端验签、CNB/GitHub 双端点、可信缓存与防回滚，以及 Catalog 构建和发布流水线。接下来保持小而可验证：
+代码已具备签名 Catalog 的核心链路：客户端验签、CNB/GitHub 双端点、可信缓存与防回滚，以及 Catalog 构建和发布流水线。接下来保持小而可验证：
 
-1. 完成真实 Catalog 的端到端验收与 beta 反馈闭环。
+1. 完成真实 Catalog 的端到端验收与正式发布反馈闭环。
 2. 完成 Catalog 通用 Candidate 的 shell 激活（传递 `home_env`）与动态补全，真正做到新增兼容工具无需发新版 jkv。
 3. 持续扩展审核过的版本与平台覆盖，完善 checksum、撤销和镜像健康检查。
 
