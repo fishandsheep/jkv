@@ -23,14 +23,36 @@ jobs:
 
           test -n "$CNB_TOKEN" || { echo '缺少 CNB_JKV_TOKEN' >&2; exit 1; }
           releases="$(curl -fsS "$api?page=1&page_size=100" "${headers[@]}")"
+          jq -c '[.[] | {tag_name, id, draft}]' <<<"$releases"
 
           for tag in "${tags[@]}"; do
-            release_id="$(jq -er --arg tag "$tag" '.[] | select(.tag_name == $tag) | .id' <<<"$releases")"
-            curl -fsS -X DELETE "$api/$release_id" "${headers[@]}" >/dev/null
+            release_id="$(jq -er --arg tag "$tag" '.[] | select(.tag_name == $tag) | .id' <<<"$releases" || true)"
+            if test -z "$release_id"; then
+              echo "CNB release already absent: $tag"
+              continue
+            fi
+            body="$(mktemp)"
+            status="$(curl -sS -o "$body" -w '%{http_code}' -X DELETE "$api/$release_id" "${headers[@]}" || true)"
+            if test "$status" != 200; then
+              echo "CNB release deletion failed: tag=$tag id=$release_id status=$status" >&2
+              sed -n '1,20p' "$body" >&2
+              exit 1
+            fi
+            echo "Deleted CNB release: $tag"
           done
 
           for tag in "${tags[@]}"; do
-            curl -fsS -X DELETE "https://api.cnb.cool/${repo}/-/git/tags/${tag}" "${headers[@]}" >/dev/null
+            body="$(mktemp)"
+            status="$(curl -sS -o "$body" -w '%{http_code}' -X DELETE "https://api.cnb.cool/${repo}/-/git/tags/${tag}" "${headers[@]}" || true)"
+            case "$status" in
+              204) echo "Deleted CNB tag: $tag" ;;
+              404) echo "CNB tag already absent: $tag" ;;
+              *)
+                echo "CNB tag deletion failed: tag=$tag status=$status" >&2
+                sed -n '1,20p' "$body" >&2
+                exit 1
+                ;;
+            esac
           done
 
           remaining="$(curl -fsS "$api?page=1&page_size=100" "${headers[@]}")"
