@@ -117,16 +117,16 @@ func TestCatalogMinimumClientVersion(t *testing.T) {
 	original := version
 	defer func() { version = original }()
 
-	version = "v0.3.0-beta.1"
-	if _, err := compatibleCatalogSnapshot(catalog.Snapshot{MinClientVersion: "0.3.0-beta.1"}); err != nil {
+	version = "v0.0.1"
+	if _, err := compatibleCatalogSnapshot(catalog.Snapshot{MinClientVersion: "0.0.1"}); err != nil {
 		t.Fatalf("matching version rejected: %v", err)
 	}
-	version = "v0.3.0-beta.2"
-	if _, err := compatibleCatalogSnapshot(catalog.Snapshot{MinClientVersion: "0.3.0-beta.1"}); err != nil {
-		t.Fatalf("newer prerelease rejected: %v", err)
+	version = "v0.0.2"
+	if _, err := compatibleCatalogSnapshot(catalog.Snapshot{MinClientVersion: "0.0.1"}); err != nil {
+		t.Fatalf("newer version rejected: %v", err)
 	}
-	version = "v0.2.0"
-	if _, err := compatibleCatalogSnapshot(catalog.Snapshot{MinClientVersion: "0.3.0-beta.1"}); err == nil || !strings.Contains(err.Error(), "请升级") {
+	version = "v0.0.0"
+	if _, err := compatibleCatalogSnapshot(catalog.Snapshot{MinClientVersion: "0.0.1"}); err == nil || !strings.Contains(err.Error(), "请升级") {
 		t.Fatalf("old client accepted: %v", err)
 	}
 	version = "dev"

@@ -4,7 +4,26 @@
 
 ## Unreleased
 
-计划版本：`v0.2.0-beta.1`（GitHub Pre-release）。
+后续版本变更将在此记录。
+
+## v0.0.1
+
+重置 jkv 发布基线，发布首个 `jkv (Java Kit Version)` 版本。
+
+### Added
+
+- 将 jkv 定位为 Java 生态及开发者工具版本管理器，覆盖 Java、Maven、Gradle、Ant、Groovy、JMeter、Tomcat 和 Spring Boot CLI。
+- GitHub 与 CNB 使用同一套六平台二进制、安装器、校验文件、SPDX SBOM 和 provenance 资产。
+- 正式发布版本内置 Catalog 信任根，并消费 `catalog-v1-000004` 签名 Snapshot。
+
+### Representative output
+
+```text
+$ jkv version
+jkv v0.0.1
+```
+
+## v0.2.0-beta.1（历史）
 
 ### Added
 

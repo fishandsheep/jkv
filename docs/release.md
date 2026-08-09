@@ -9,7 +9,7 @@
 
 ## 发布
 
-推送 `v*` tag。工作流构建六个平台二进制，为每个制品生成 SHA-256、SPDX JSON SBOM 和 GitHub artifact attestation；随后创建 GitHub 与 CNB 同名草稿 Release，上传全部附件并校验每个文件的名称、大小、SHA-256，最后发布两端并从公开 URL 再逐文件比对。含 `-` 的 tag 标记为 prerelease。
+当前发布基线为 `v0.0.1`；后续推送 `v*` tag。工作流构建六个平台二进制，为每个制品生成 SHA-256、SPDX JSON SBOM 和 GitHub artifact attestation；随后创建 GitHub 与 CNB 同名草稿 Release，上传全部附件并校验每个文件的名称、大小、SHA-256，最后发布两端并从公开 URL 再逐文件比对。含 `-` 的 tag 标记为 prerelease。
 
 CNB URL 固定为 `https://cnb.cool/<CNB 组织>/<CNB 仓库>/-/releases/download/<tag>/<asset>`。安装器会写入该 tag 的 CNB 下载基址；国内传输失败才回退同一 tag 的 GitHub 固定地址，不使用可能漂移的 `latest`。已发布 CNB Release 不允许覆盖；失败会保留草稿供排查。
 

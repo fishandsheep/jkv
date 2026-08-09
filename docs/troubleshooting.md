@@ -24,7 +24,7 @@ PowerShell 使用 `Invoke-Expression ((jkv init powershell) -join "`n")`。
 
 jkv 尊重系统 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 和系统 CA。检查代理是否允许目标域名。`jkv list <candidate> --refresh --verbose` 跳过本地 catalog 缓存。
 
-失败不会静默切换 JVM 工具到 GitHub。安装 jkv 本身时，国内制品传输失败才会使用 GitHub 后备；SHA-256 不匹配会立即终止。
+失败不会静默切换 Java 生态工具到 GitHub。安装 jkv 本身时，国内制品传输失败才会使用 GitHub 后备；SHA-256 不匹配会立即终止。
 
 ## 安装损坏
 

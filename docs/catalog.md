@@ -4,7 +4,7 @@
 
 `jkv list` 和 `jkv install` 面向日常使用；无需手动下载或编辑 Catalog。工具包仍从条目声明的公共 HTTPS 源下载，Catalog 只提供经过审核的元数据。
 
-v0.3 客户端会验证 `latest.json` 和不可变 Snapshot 的 Ed25519 签名，并保存最近可信 Snapshot。更新网络失败时，已有缓存继续可用；首次使用且无法取得可信 Catalog 时会明确失败，而不会回退执行远端 Provider。
+v0.0.1 客户端会验证 `latest.json` 和不可变 Snapshot 的 Ed25519 签名，并保存最近可信 Snapshot。更新网络失败时，已有缓存继续可用；首次使用且无法取得可信 Catalog 时会明确失败，而不会回退执行远端 Provider。
 
 ```sh
 jkv list java --refresh

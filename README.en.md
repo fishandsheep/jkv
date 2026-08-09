@@ -1,20 +1,22 @@
 # jkv
 
-A China-network-friendly, cross-platform version manager for JVM tools. Install, switch, and pin Java, Maven, Gradle, and more with one CLI.
+jkv (Java Kit Version) is a China-network-friendly, cross-platform version manager for the Java ecosystem and developer tools. Install, switch, and pin Java, Maven, Gradle, Ant, Groovy, JMeter, Tomcat, Spring Boot CLI, and more with one CLI.
 
 [中文](README.md) · [command reference](docs/commands.md) · [troubleshooting](docs/troubleshooting.md) · [security](SECURITY.md)
+
+The current release is [`v0.0.1`](https://github.com/fishandsheep/jkv/releases/tag/v0.0.1). Core support covers Java (Temurin), Maven, and Gradle. Dragonwell, BiSheng, Ant, Groovy, JMeter, Tomcat, and Spring Boot CLI are beta; run `jkv list` for versions currently available on your platform.
 
 ## Quick start
 
 ```sh
-curl -fsSL https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.3.0-beta.2/install.sh | sh
+curl -fsSL https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.0.1/install.sh | sh
 ```
 
 ```powershell
-irm https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.3.0-beta.2/install.ps1 | iex
+irm https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.0.1/install.ps1 | iex
 ```
 
-The installer prefers CNB and falls back to GitHub only after a transfer failure; a checksum mismatch is terminal. Or download a binary from [Releases](https://github.com/fishandsheep/jkv/releases/latest), or run `go install github.com/fishandsheep/jkv/cmd/jkv@v0.3.0-beta.2`.
+The installer prefers CNB and falls back to GitHub only after a transfer failure; a checksum mismatch is terminal. Or download a binary from [Releases](https://github.com/fishandsheep/jkv/releases/latest), or run `go install github.com/fishandsheep/jkv/cmd/jkv@v0.0.1`.
 
 Load a shell hook before switching versions:
 
@@ -39,6 +41,6 @@ Use `jkv env init` and `jkv env apply` to commit a project `.jkvrc`. Maven and G
 
 ## Catalog
 
-jkv manages local downloads and installations. [jkv-catalog](https://github.com/fishandsheep/jkv-catalog) reviews versions, platforms, URLs, and checksums. v0.3 consumes signed catalog snapshots while never downloading or executing remote provider code. See [Catalog usage](docs/catalog.md).
+jkv manages local downloads and installations. [jkv-catalog](https://github.com/fishandsheep/jkv-catalog) reviews versions, platforms, URLs, and checksums. v0.0.1 consumes signed catalog snapshots while never downloading or executing remote provider code. See [Catalog usage](docs/catalog.md).
 
 For all commands, JSON output, exit codes, contribution guidance, and source policy, start from the [Chinese README](README.md).
