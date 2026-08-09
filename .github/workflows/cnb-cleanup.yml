@@ -33,12 +33,14 @@ jobs:
             fi
             body="$(mktemp)"
             status="$(curl -sS -o "$body" -w '%{http_code}' -X DELETE "$api/$release_id" "${headers[@]}" || true)"
-            if test "$status" != 200; then
-              echo "CNB release deletion failed: tag=$tag id=$release_id status=$status" >&2
-              sed -n '1,20p' "$body" >&2
-              exit 1
-            fi
-            echo "Deleted CNB release: $tag"
+            case "$status" in
+              200|204) echo "Deleted CNB release: $tag" ;;
+              *)
+                echo "CNB release deletion failed: tag=$tag id=$release_id status=$status" >&2
+                sed -n '1,20p' "$body" >&2
+                exit 1
+                ;;
+            esac
           done
 
           for tag in "${tags[@]}"; do
