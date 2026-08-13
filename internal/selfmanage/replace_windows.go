@@ -39,20 +39,45 @@ func writeWindowsHelper(directory string, parentPID int, target, staged string, 
 		"set \"STAGED=" + cmdValue(staged) + "\"\r\n" +
 		"set \"BACKUP=" + cmdValue(target+".old") + "\"\r\n" +
 		"set \"PURGE=" + cmdValue(purgeRoot) + "\"\r\n" +
+		"set ATTEMPTS=0\r\n" +
 		":wait\r\n" +
-		"tasklist /FI \"PID eq " + strconv.Itoa(parentPID) + "\" 2>NUL | find \"" + strconv.Itoa(parentPID) + "\" >NUL && (ping 127.0.0.1 -n 2 >NUL & goto wait)\r\n" +
+		"tasklist /FI \"PID eq " + strconv.Itoa(parentPID) + "\" 2>NUL | find \"" + strconv.Itoa(parentPID) + "\" >NUL\r\n" +
+		"if errorlevel 1 goto dispatch\r\n" +
+		"set /a ATTEMPTS+=1\r\n" +
+		"if %ATTEMPTS% GEQ 120 goto fail\r\n" +
+		"ping 127.0.0.1 -n 2 >NUL\r\n" +
+		"goto wait\r\n" +
+		":dispatch\r\n" +
 		"if \"" + mode + "\"==\"remove\" goto remove\r\n" +
-		"move /Y \"%TARGET%\" \"%BACKUP%\" >NUL || goto fail\r\n" +
-		"move /Y \"%STAGED%\" \"%TARGET%\" >NUL || goto restore\r\n" +
-		"del /F /Q \"%BACKUP%\" >NUL 2>&1\r\n" +
-		"goto cleanup\r\n" +
+		"set ATTEMPTS=0\r\n" +
+		":backup\r\n" +
+		"move /Y \"%TARGET%\" \"%BACKUP%\" >NUL && goto install\r\n" +
+		"set /a ATTEMPTS+=1\r\n" +
+		"if %ATTEMPTS% GEQ 60 goto fail\r\n" +
+		"ping 127.0.0.1 -n 2 >NUL\r\n" +
+		"goto backup\r\n" +
+		":install\r\n" +
+		"move /Y \"%STAGED%\" \"%TARGET%\" >NUL && goto cleanup\r\n" +
+		"set ATTEMPTS=0\r\n" +
 		":restore\r\n" +
-		"move /Y \"%BACKUP%\" \"%TARGET%\" >NUL\r\n" +
-		"goto fail\r\n" +
+		"move /Y \"%BACKUP%\" \"%TARGET%\" >NUL && goto fail\r\n" +
+		"set /a ATTEMPTS+=1\r\n" +
+		"if %ATTEMPTS% GEQ 60 goto fail\r\n" +
+		"ping 127.0.0.1 -n 2 >NUL\r\n" +
+		"goto restore\r\n" +
 		":remove\r\n" +
+		"set ATTEMPTS=0\r\n" +
+		":delete\r\n" +
 		"del /F /Q \"%TARGET%\" >NUL 2>&1\r\n" +
+		"if not exist \"%TARGET%\" goto removed\r\n" +
+		"set /a ATTEMPTS+=1\r\n" +
+		"if %ATTEMPTS% GEQ 60 goto fail\r\n" +
+		"ping 127.0.0.1 -n 2 >NUL\r\n" +
+		"goto delete\r\n" +
+		":removed\r\n" +
 		"if not \"%PURGE%\"==\"\" (start \"\" /B cmd /C \"ping 127.0.0.1 -n 2 ^>NUL ^& rmdir /S /Q ^\"%PURGE%^\"\" & exit /B 0)\r\n" +
 		":cleanup\r\n" +
+		"del /F /Q \"%BACKUP%\" >NUL 2>&1\r\n" +
 		"del /F /Q \"%~f0\"\r\n" +
 		"exit /B 0\r\n" +
 		":fail\r\n" +

@@ -306,14 +306,14 @@ jobs:
             $env:JKV_DIR = $root
             & (Join-Path $root 'bin\jkv.exe') self update
             $updated = $false
-            foreach ($attempt in 1..15) {
+            foreach ($attempt in 1..75) {
               if ((& (Join-Path $root 'bin\jkv.exe') version) -eq 'jkv v0.0.2') { $updated = $true; break }
               Start-Sleep -Seconds 1
             }
             if (-not $updated) { throw 'self-update did not replace binary' }
             & (Join-Path $root 'bin\jkv.exe') self uninstall
             $removed = $false
-            foreach ($attempt in 1..15) {
+            foreach ($attempt in 1..75) {
               if (-not (Test-Path (Join-Path $root 'bin\jkv.exe'))) { $removed = $true; break }
               Start-Sleep -Seconds 1
             }

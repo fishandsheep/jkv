@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -368,5 +369,5 @@ func readCatalogFixture(t *testing.T, name string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return b
+	return bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
 }
