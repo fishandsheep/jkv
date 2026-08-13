@@ -223,6 +223,28 @@ func TestUninstallValidatesAllBlocksBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestBlockOwnershipRequiresExactAssignments(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "jkv")
+	cases := []struct {
+		name  string
+		block string
+		valid bool
+	}{
+		{name: "exact", block: "export JKV_DIR='" + root + "'", valid: true},
+		{name: "prefix is not exact", block: "export JKV_DIR='" + root + "-other'", valid: false},
+		{name: "other assignment wins", block: "export JKV_DIR='" + root + "'\nexport JKV_DIR='/other'", valid: false},
+		{name: "fish", block: "set -gx JKV_DIR '" + root + "'", valid: true},
+		{name: "powershell", block: "$env:JKV_DIR = '" + root + "'", valid: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := blockOwnsRoot(tc.block, root); got != tc.valid {
+				t.Fatalf("blockOwnsRoot = %v, want %v", got, tc.valid)
+			}
+		})
+	}
+}
+
 func TestPurgeConfirmationAndSafety(t *testing.T) {
 	root, target := managedFixture(t, []byte("binary"))
 	manager := New(Config{Root: root, Executable: target})

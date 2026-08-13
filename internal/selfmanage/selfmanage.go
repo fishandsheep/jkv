@@ -30,12 +30,13 @@ const (
 )
 
 var (
-	ErrNetwork   = errors.New("自身管理网络错误")
-	ErrIntegrity = errors.New("自身管理完整性校验失败")
-	ErrState     = errors.New("自身管理状态错误")
-	versionRE    = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)$`)
-	badgeTagRE   = regexp.MustCompile(`(?i)>\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*</text>`)
-	shaLineRE    = regexp.MustCompile(`(?i)^([0-9a-f]{64})[ \t]+[*]?([^ \t\r\n]+)[ \t]*$`)
+	ErrNetwork    = errors.New("自身管理网络错误")
+	ErrIntegrity  = errors.New("自身管理完整性校验失败")
+	ErrState      = errors.New("自身管理状态错误")
+	versionRE     = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+	badgeTagRE    = regexp.MustCompile(`(?i)>\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*</text>`)
+	shaLineRE     = regexp.MustCompile(`(?i)^([0-9a-f]{64})[ \t]+[*]?([^ \t\r\n]+)[ \t]*$`)
+	profileRootRE = regexp.MustCompile(`^\s*(?:(?:export\s+)|(?:set\s+-gx\s+)|(?:\$env:))?JKV_DIR(?:\s*=\s*|\s+)(.*?)\s*;?\s*$`)
 )
 
 type Receipt struct {
@@ -107,7 +108,15 @@ func SaveReceipt(root, binary string, profiles []string) error {
 	if err != nil {
 		return err
 	}
-	receipt := Receipt{SchemaVersion: 1, Root: canonicalRoot, Binary: canonicalBinary, Profiles: uniquePaths(profiles)}
+	canonicalProfiles := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		canonicalProfile, profileErr := canonicalPath(profile)
+		if profileErr != nil {
+			return profileErr
+		}
+		canonicalProfiles = append(canonicalProfiles, canonicalProfile)
+	}
+	receipt := Receipt{SchemaVersion: 1, Root: canonicalRoot, Binary: canonicalBinary, Profiles: uniquePaths(canonicalProfiles)}
 	body, err := json.MarshalIndent(receipt, "", "  ")
 	if err != nil {
 		return err
@@ -152,12 +161,12 @@ func (m *Manager) Update(ctx context.Context) (string, bool, error) {
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".jkv-update-")
 	if err != nil {
-		return "", false, err
+		return "", false, fmt.Errorf("%w: 创建更新临时文件: %v", ErrState, err)
 	}
 	tmpPath := tmp.Name()
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return "", false, err
+		return "", false, fmt.Errorf("%w: 关闭更新临时文件: %v", ErrState, err)
 	}
 	keepStaged := false
 	defer func() {
@@ -192,7 +201,7 @@ func (m *Manager) Update(ctx context.Context) (string, bool, error) {
 		return "", false, fmt.Errorf("%w: 所有 jkv 下载地址均不可用", ErrNetwork)
 	}
 	if err := os.Chmod(tmpPath, 0o755); err != nil {
-		return "", false, err
+		return "", false, fmt.Errorf("%w: 设置更新文件权限: %v", ErrState, err)
 	}
 	if err := replaceExecutable(target, tmpPath); err != nil {
 		return "", false, err
@@ -283,6 +292,10 @@ func (m *Manager) managedTarget() (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("%w: 规范化受管二进制: %v", ErrState, err)
 	}
+	lexicalTarget := filepath.Clean(filepath.Join(root, "bin", name))
+	if !samePath(target, lexicalTarget) || !pathContains(root, target) {
+		return "", "", fmt.Errorf("%w: 受管二进制路径包含符号链接或越界: %s", ErrState, target)
+	}
 	if !samePath(executable, target) {
 		return "", "", fmt.Errorf("%w: 当前二进制不由 JKV_DIR 管理: %s", ErrState, executable)
 	}
@@ -317,9 +330,22 @@ func (m *Manager) downloadPair(ctx context.Context, rawURL, asset, path string) 
 	if err := m.download(ctx, rawURL, path, 256<<20); err != nil {
 		return "", err
 	}
-	body, err := m.get(ctx, rawURL+".sha256", 4096)
+	checksumFile, err := os.CreateTemp(filepath.Dir(path), ".jkv-sha256-")
 	if err != nil {
+		return "", fmt.Errorf("%w: 创建校验临时文件: %v", ErrState, err)
+	}
+	checksumPath := checksumFile.Name()
+	if err := checksumFile.Close(); err != nil {
+		_ = os.Remove(checksumPath)
+		return "", fmt.Errorf("%w: 关闭校验临时文件: %v", ErrState, err)
+	}
+	defer os.Remove(checksumPath)
+	if err := m.download(ctx, rawURL+".sha256", checksumPath, 4096); err != nil {
 		return "", err
+	}
+	body, err := os.ReadFile(checksumPath)
+	if err != nil {
+		return "", fmt.Errorf("%w: 读取校验文件: %v", ErrState, err)
 	}
 	line := strings.TrimSpace(string(body))
 	match := shaLineRE.FindStringSubmatch(line)
@@ -509,6 +535,9 @@ func loadOwnedReceipt(root, target string) (Receipt, error) {
 	if json.Unmarshal(bytesWithoutBOM(body), &receipt) != nil || receipt.SchemaVersion != 1 {
 		return Receipt{}, fmt.Errorf("%w: 安装收据无效: %s", ErrState, receiptPath)
 	}
+	if strings.TrimSpace(receipt.Root) == "" || strings.TrimSpace(receipt.Binary) == "" {
+		return Receipt{}, fmt.Errorf("%w: 安装收据缺少根目录或二进制路径", ErrState)
+	}
 	receiptRoot, rootErr := canonicalPath(receipt.Root)
 	receiptBinary, binaryErr := canonicalPath(receipt.Binary)
 	if rootErr != nil || binaryErr != nil || !samePath(receiptRoot, root) || !samePath(receiptBinary, target) {
@@ -588,37 +617,40 @@ func validateAndRemoveBlock(path, root string) ([]byte, bool, error) {
 }
 
 func blockOwnsRoot(block, root string) bool {
-	normalized := filepath.ToSlash(root)
-	variants := []string{root, normalized, strings.ReplaceAll(root, `\`, `\\`)}
-	for _, value := range variants {
-		if value != "" && strings.Contains(block, value) {
-			return true
-		}
-	}
 	// Installers may write the lexical JKV_DIR path while receipt validation
 	// canonicalizes through a platform symlink (notably macOS /var -> /private/var).
 	// Resolve only explicit JKV_DIR assignments; arbitrary text must not establish
-	// ownership of a managed block.
+	// ownership of a managed block. Every assignment must agree with root.
+	found := false
 	for _, line := range strings.Split(block, "\n") {
-		marker := strings.Index(line, "JKV_DIR")
-		if marker < 0 {
+		match := profileRootRE.FindStringSubmatch(line)
+		if len(match) != 2 {
 			continue
 		}
-		value := line[marker+len("JKV_DIR"):]
-		if equal := strings.IndexByte(value, '='); equal >= 0 {
-			value = value[equal+1:]
-		}
-		value = strings.TrimSpace(value)
-		value = strings.Trim(value, "'\"")
-		value = strings.TrimSpace(strings.TrimSuffix(value, ";"))
+		found = true
+		value := strings.TrimSpace(match[1])
+		value = unquoteProfilePath(value)
 		if value == "" {
-			continue
+			return false
 		}
-		if canonical, err := canonicalPath(value); err == nil && samePath(canonical, root) {
-			return true
+		canonical, err := canonicalPath(value)
+		if err != nil || !samePath(canonical, root) {
+			return false
 		}
 	}
-	return false
+	return found
+}
+
+func unquoteProfilePath(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+		quote := value[0]
+		value = value[1 : len(value)-1]
+		if quote == '\'' {
+			value = strings.ReplaceAll(value, "''", "'")
+		}
+	}
+	return strings.TrimSpace(value)
 }
 
 func atomicWrite(path string, body []byte, mode os.FileMode) error {
