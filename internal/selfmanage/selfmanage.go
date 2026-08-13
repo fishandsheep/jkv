@@ -621,6 +621,10 @@ func blockOwnsRoot(block, root string) bool {
 	// canonicalizes through a platform symlink (notably macOS /var -> /private/var).
 	// Resolve only explicit JKV_DIR assignments; arbitrary text must not establish
 	// ownership of a managed block. Every assignment must agree with root.
+	canonicalRoot, err := canonicalPath(root)
+	if err != nil {
+		return false
+	}
 	found := false
 	for _, line := range strings.Split(block, "\n") {
 		match := profileRootRE.FindStringSubmatch(line)
@@ -634,7 +638,7 @@ func blockOwnsRoot(block, root string) bool {
 			return false
 		}
 		canonical, err := canonicalPath(value)
-		if err != nil || !samePath(canonical, root) {
+		if err != nil || !samePath(canonical, canonicalRoot) {
 			return false
 		}
 	}

@@ -165,6 +165,26 @@ func TestUnixInstallerRejectsForeignManagedBlockBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestUnixInstallerRejectsPrefixForeignManagedBlock(t *testing.T) {
+	server := installerFixtureServer(t, false)
+	defer server.Close()
+	home := t.TempDir()
+	installDir := filepath.Join(t.TempDir(), "jkv")
+	profilePath := filepath.Join(home, ".bashrc")
+	foreign := "before\n# >>> jkv managed >>>\nexport JKV_DIR='" + installDir + "-other'\n# <<< jkv managed <<<\nafter\n"
+	if err := os.WriteFile(profilePath, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := unixInstallerCommand(home, installDir, server.URL, "", nil)
+	if output, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(output), "指向其他 JKV_DIR") {
+		t.Fatalf("prefix foreign block install = %v\n%s", err, output)
+	}
+	got, _ := os.ReadFile(profilePath)
+	if string(got) != foreign {
+		t.Fatalf("prefix foreign profile changed: %q", got)
+	}
+}
+
 func TestUnixInstallerConfiguresFish(t *testing.T) {
 	server := installerFixtureServer(t, false)
 	defer server.Close()

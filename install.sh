@@ -85,10 +85,32 @@ validate_managed_block_owner() {
     $0 == end { managed=0 }
   ' "$rc")
   [ -z "$block" ] && return 0
-  case "$block" in
-    *"$JKV_DIR"*) ;;
-    *) echo "shell 配置中的 jkv managed block 指向其他 JKV_DIR，拒绝修改: $rc" >&2; exit 1 ;;
-  esac
+  if [ "$shell_name" = fish ]; then
+    escaped_dir=$(printf '%s' "$JKV_DIR" | sed "s/'/\\\\'/g")
+    expected_line="set -gx JKV_DIR '$escaped_dir'"
+  else
+    escaped_dir=$(printf '%s' "$JKV_DIR" | sed "s/'/'\\\\''/g")
+    expected_line="export JKV_DIR='$escaped_dir'"
+  fi
+  owns=false
+  foreign=false
+  while IFS= read -r line; do
+    case "$line" in
+      "export JKV_DIR="*|"set -gx JKV_DIR "*)
+        if [ "$line" = "$expected_line" ]; then
+          if [ "$owns" = true ]; then foreign=true; fi
+          owns=true
+        else
+          foreign=true
+        fi ;;
+    esac
+  done <<EOF
+$block
+EOF
+  if [ "$owns" != true ] || [ "$foreign" = true ]; then
+    echo "shell 配置中的 jkv managed block 指向其他 JKV_DIR，拒绝修改: $rc" >&2
+    exit 1
+  fi
 }
 
 if [ "$action" = uninstall ]; then

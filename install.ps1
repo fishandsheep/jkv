@@ -41,7 +41,10 @@ function Remove-JkvProfileBlock {
   }
   if ($beginMatches.Count -eq 1) {
     $block = $text.Substring($beginMatches[0].Index, $endMatches[0].Index + $managedEnd.Length - $beginMatches[0].Index)
-    if (-not $block.Contains($fullInstallDir)) {
+    $escapedDir = $fullInstallDir.Replace("'", "''")
+    $expectedAssignment = "`$env:JKV_DIR = '" + $escapedDir + "'"
+    $assignments = @($block -split '\r?\n' | Where-Object { $_ -match '^\s*\$env:JKV_DIR\s*=' })
+    if ($assignments.Count -ne 1 -or $assignments[0].Trim() -ne $expectedAssignment) {
       throw "PowerShell profile 中的 jkv managed block 指向其他 JKV_DIR，拒绝修改: $PROFILE"
     }
   }
