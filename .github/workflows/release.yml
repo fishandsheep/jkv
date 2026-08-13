@@ -180,12 +180,16 @@ jobs:
           releases="$(curl -fsS "$api?page=1&page_size=100" "${headers[@]}" || true)"
           existing="$(jq -e --arg tag "$GITHUB_REF_NAME" '.[]? | select(.tag_name == $tag)' <<<"$releases" || true)"
           release_id="$(jq -r '.id // empty' <<<"$existing")"
+          upload_assets=false
           if test -z "$release_id"; then
             release="$(curl -sS --fail-with-body -X POST "$api" "${headers[@]}" -H 'Content-Type: application/json' \
               --data "$(jq -nc --arg tag "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" '{tag_name:$tag,target_commitish:"main",name:$tag,body:("jkv release from GitHub commit " + $commit),draft:true,make_latest:"false"}')")"
             release_id="$(jq -er '.id' <<<"$release")"
+            upload_assets=true
           elif test "$(jq -er '.draft' <<<"$existing")" != true; then
             echo "CNB release already published; verify existing assets: $GITHUB_REF_NAME"
+          else
+            upload_assets=true
           fi
           upload() {
             file="$1"
@@ -194,7 +198,9 @@ jobs:
             curl -fsS -X PUT --upload-file "$file" "$(jq -er '.upload_url' <<<"$ticket")"
             curl -fsS -X POST "${headers[@]}" "$(jq -er '.verify_url' <<<"$ticket")?ttl=0"
           }
-          for file in dist/*; do upload "$file"; done
+          if test "$upload_assets" = true; then
+            for file in dist/*; do upload "$file"; done
+          fi
           release_after_upload="$(curl -fsS "$api/$release_id" "${headers[@]}")"
           verify_cnb_asset() {
             file="$1"
