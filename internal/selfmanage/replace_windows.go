@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 )
@@ -27,7 +26,7 @@ func replaceExecutable(target, staged string) error {
 	return nil
 }
 
-func writeWindowsHelper(directory string, parentPID int, target, staged string, removeOnly bool, purgeRoot string) (string, error) {
+func writeWindowsHelper(directory string, _ int, target, staged string, removeOnly bool, purgeRoot string) (string, error) {
 	helper := filepath.Join(directory, fmt.Sprintf(".jkv-helper-%d.cmd", os.Getpid()))
 	mode := "replace"
 	if removeOnly {
@@ -40,17 +39,9 @@ func writeWindowsHelper(directory string, parentPID int, target, staged string, 
 		"set \"BACKUP=" + cmdValue(target+".old") + "\"\r\n" +
 		"set \"PURGE=" + cmdValue(purgeRoot) + "\"\r\n" +
 		"set ATTEMPTS=0\r\n" +
-		":wait\r\n" +
-		"tasklist /FI \"PID eq " + strconv.Itoa(parentPID) + "\" 2>NUL | find \"" + strconv.Itoa(parentPID) + "\" >NUL\r\n" +
-		"if errorlevel 1 goto dispatch\r\n" +
-		"set /a ATTEMPTS+=1\r\n" +
-		"if %ATTEMPTS% GEQ 120 goto fail\r\n" +
-		"ping 127.0.0.1 -n 2 >NUL\r\n" +
-		"goto wait\r\n" +
-		":dispatch\r\n" +
 		"if \"" + mode + "\"==\"remove\" goto remove\r\n" +
-		"set ATTEMPTS=0\r\n" +
 		":backup\r\n" +
+		"del /F /Q \"%BACKUP%\" >NUL 2>&1\r\n" +
 		"move /Y \"%TARGET%\" \"%BACKUP%\" >NUL && goto install\r\n" +
 		"set /a ATTEMPTS+=1\r\n" +
 		"if %ATTEMPTS% GEQ 60 goto fail\r\n" +
