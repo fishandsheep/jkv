@@ -650,8 +650,15 @@ func unquoteProfilePath(value string) string {
 	if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
 		quote := value[0]
 		value = value[1 : len(value)-1]
-		if quote == '\'' {
+		switch quote {
+		case '\'':
+			// Bash emits '\'' for a literal apostrophe; fish emits \\'.
+			value = strings.ReplaceAll(value, "'\\''", "'")
+			value = strings.ReplaceAll(value, "\\'", "'")
+			// PowerShell escapes apostrophes by doubling them.
 			value = strings.ReplaceAll(value, "''", "'")
+		case '"':
+			value = strings.ReplaceAll(value, `\\"`, `"`)
 		}
 	}
 	return strings.TrimSpace(value)

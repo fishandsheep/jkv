@@ -245,6 +245,20 @@ func TestBlockOwnershipRequiresExactAssignments(t *testing.T) {
 	}
 }
 
+func TestBlockOwnershipUnquotesManagedPathEscapes(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "jkv'quoted")
+	cases := []string{
+		"export JKV_DIR='" + strings.ReplaceAll(root, "'", "'\\''") + "'",
+		"set -gx JKV_DIR '" + strings.ReplaceAll(root, "'", "\\'") + "'",
+		"$env:JKV_DIR = '" + strings.ReplaceAll(root, "'", "''") + "'",
+	}
+	for _, block := range cases {
+		if !blockOwnsRoot(block, root) {
+			t.Fatalf("escaped managed block rejected: %q", block)
+		}
+	}
+}
+
 func TestPurgeConfirmationAndSafety(t *testing.T) {
 	root, target := managedFixture(t, []byte("binary"))
 	manager := New(Config{Root: root, Executable: target})
