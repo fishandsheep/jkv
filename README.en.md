@@ -4,19 +4,21 @@ jkv (Java Kit Version) is a China-network-friendly, cross-platform version manag
 
 [中文](README.md) · [command reference](docs/commands.md) · [troubleshooting](docs/troubleshooting.md) · [security](SECURITY.md)
 
-The current release is [`v0.0.1`](https://github.com/fishandsheep/jkv/releases/tag/v0.0.1). Core support covers Java (Temurin), Maven, and Gradle. Dragonwell, BiSheng, Ant, Groovy, JMeter, Tomcat, and Spring Boot CLI are beta; run `jkv list` for versions currently available on your platform.
+The current release is [`v0.0.2`](https://github.com/fishandsheep/jkv/releases/tag/v0.0.2). Core support covers Java (Temurin), Maven, and Gradle. Dragonwell, BiSheng, Ant, Groovy, JMeter, Tomcat, and Spring Boot CLI are beta; run `jkv list` for versions currently available on your platform.
 
 ## Quick start
 
 ```sh
-curl -fsSL https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.0.1/install.sh | sh
+curl -fsSL https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.0.2/install.sh | sh
 ```
 
 ```powershell
-irm https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.0.1/install.ps1 | iex
+irm https://cnb.cool/fishandsheep/jkv/-/releases/download/v0.0.2/install.ps1 | iex
 ```
 
-The installer prefers CNB and falls back to GitHub only after a transfer failure; a checksum mismatch is terminal. Or download a binary from [Releases](https://github.com/fishandsheep/jkv/releases/latest), or run `go install github.com/fishandsheep/jkv/cmd/jkv@v0.0.1`.
+The installer prefers CNB and falls back to GitHub only after a transfer failure; a checksum mismatch is terminal. Or download a binary from [Releases](https://github.com/fishandsheep/jkv/releases/latest), or run `go install github.com/fishandsheep/jkv/cmd/jkv@v0.0.2`. Binaries installed by `go install`, package managers, or manual copies are intentionally outside self-management.
+
+Users on `v0.0.1` must run the `v0.0.2` installer once so it can write the ownership receipt. Subsequent upgrades can use `jkv self update`.
 
 Load a shell hook before switching versions:
 
@@ -35,12 +37,16 @@ jkv use java 21-tem       # alias: jkv u; current shell
 jkv default java 21-tem   # alias: jkv d; new shells
 jkv current               # alias: jkv c
 jkv doctor
+jkv self update           # alias: jkv s up
+jkv self uninstall        # alias: jkv s rm; keeps candidates
 ```
+
+`jkv list <candidate>` merges the signed catalog with local installations. Older installed versions remain visible and usable after they leave the online catalog; their source is shown as `local`.
 
 Use `jkv env init` and `jkv env apply` to commit a project `.jkvrc`. Maven and Gradle dependency mirrors are configured separately with `jkv mirror <maven|gradle> --apply`.
 
 ## Catalog
 
-jkv manages local downloads and installations. [jkv-catalog](https://github.com/fishandsheep/jkv-catalog) reviews versions, platforms, URLs, and checksums. v0.0.1 consumes signed catalog snapshots while never downloading or executing remote provider code. See [Catalog usage](docs/catalog.md).
+jkv manages local downloads and installations. [jkv-catalog](https://github.com/fishandsheep/jkv-catalog) reviews versions, platforms, URLs, and checksums. v0.0.2 consumes signed catalog snapshots while never downloading or executing remote provider code. See [Catalog usage](docs/catalog.md).
 
 For all commands, JSON output, exit codes, contribution guidance, and source policy, start from the [Chinese README](README.md).

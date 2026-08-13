@@ -39,6 +39,15 @@ func TestUnixInstallerUsesActualDirectoryAndManagedBlock(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(installDir, "bin", "jkv")); err != nil {
 		t.Fatal(err)
 	}
+	receipt, err := os.ReadFile(filepath.Join(installDir, "jkv-install.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"schema_version": 1`, installDir, filepath.Join(home, ".bashrc")} {
+		if !strings.Contains(string(receipt), want) {
+			t.Fatalf("receipt missing %q: %s", want, receipt)
+		}
+	}
 }
 
 func TestUnixInstallerCanSkipProfile(t *testing.T) {
@@ -133,6 +142,26 @@ func TestUnixInstallerPurgeSafetyAndConfirmationPrecedeMutation(t *testing.T) {
 	}
 	if _, err := os.Stat(home); err != nil {
 		t.Fatalf("dangerous purge removed HOME: %v", err)
+	}
+}
+
+func TestUnixInstallerRejectsForeignManagedBlockBeforeMutation(t *testing.T) {
+	server := installerFixtureServer(t, false)
+	defer server.Close()
+	home := t.TempDir()
+	installDir := t.TempDir()
+	profilePath := filepath.Join(home, ".bashrc")
+	foreign := "before\n# >>> jkv managed >>>\nexport JKV_DIR='/other/jkv'\n# <<< jkv managed <<<\nafter\n"
+	if err := os.WriteFile(profilePath, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := unixInstallerCommand(home, installDir, server.URL, "", nil)
+	if output, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(output), "指向其他 JKV_DIR") {
+		t.Fatalf("foreign block install = %v\n%s", err, output)
+	}
+	got, _ := os.ReadFile(profilePath)
+	if string(got) != foreign {
+		t.Fatalf("foreign profile changed: %q", got)
 	}
 }
 

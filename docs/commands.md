@@ -30,6 +30,8 @@ jkv use <candidate> <version>
 jkv default <candidate> <version>
 jkv current [candidate]
 jkv uninstall <candidate> <version>
+jkv self update
+jkv self uninstall [--purge] [--yes]
 jkv home <candidate> [version]
 jkv env [init|apply|clear]
 jkv init <bash|zsh|fish|powershell>
@@ -42,4 +44,6 @@ jkv doctor
 
 中断下载位于可识别的 `$JKV_DIR/partials/downloads`。只能用带年龄门槛的 `jkv clean partials --older-than 24h` 清理；清理会等待对应安装锁，避免删除仍在使用的断点文件。
 
-`list --json` 的每个版本包含 `support_tier`、`integrity_level`、`installed`、`default`、`current`。`integrity_level` 当前为 `checksum` 或 `https-only`；前者表示 provider 提供同源 SHA-256，后者表示只能依赖 HTTPS 传输保护。
+`self` 可简写为 `s`，`update` 可简写为 `up`，自身 `uninstall` 可简写为 `rm`，并可混用。普通自身卸载只删除受管二进制和安装器拥有的 shell block，保留 candidates、默认值、配置和缓存。`--purge` 删除整个 `JKV_DIR`；交互终端需确认，非交互环境必须同时传 `--yes`。root、HOME 或 HOME 祖先目录始终拒绝。
+
+`list --json` 的每个版本包含 `support_tier`、`integrity_level`、`installed`、`default`、`current`、`in_catalog`。Catalog 中版本的 `in_catalog` 为 `true`。仅本地版本为 `in_catalog=false`、`installed=true`、`availability_known=false`、`availability_status="installed-only"`。`integrity_level` 通常为 `checksum` 或 `https-only`；元数据损坏的仅本地版本为 `unknown`。

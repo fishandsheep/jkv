@@ -9,8 +9,9 @@
 3. 安装并实际运行 Temurin、Maven、Gradle；记录版本发现和下载耗时。
 4. 测试 `use`、`default`、`.jkvrc` 的 `env init/apply/clear`。
 5. 重复安装验证幂等；损坏一个测试安装后执行 `repair`。
-6. 执行普通卸载，确认 candidates 保留；重新安装 jkv 后确认可继续使用。
-7. 可选：阻断国内 jkv 制品地址，验证 GitHub 后备；不要对第三方工具期待 GitHub 后备。
+6. 运行 `jkv s up`，确认最新版 no-op；安装一个 Catalog 已不含的旧版本，确认 `list` 仍显示并可切换。
+7. 执行 `jkv s rm`，确认 candidates、默认值和缓存保留；重新安装后确认继续可用。
+8. 可选：阻断国内 jkv 制品地址，验证 GitHub 后备；不要对第三方工具期待 GitHub 后备。
 
 ## 反馈模板
 

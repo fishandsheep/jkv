@@ -9,7 +9,7 @@
 
 ## 发布
 
-当前发布基线为 `v0.0.1`；后续推送 `v*` tag。工作流构建六个平台二进制，为每个制品生成 SHA-256、SPDX JSON SBOM 和 GitHub artifact attestation；随后创建 GitHub 与 CNB 同名草稿 Release，上传全部附件并校验每个文件的名称、大小、SHA-256，最后发布两端并从公开 URL 再逐文件比对。含 `-` 的 tag 标记为 prerelease。
+当前发布基线为 `v0.0.2`；后续推送 `v*` tag。工作流构建六个平台二进制，为每个制品生成 SHA-256、SPDX JSON SBOM 和 GitHub artifact attestation；随后创建 GitHub 与 CNB 同名草稿 Release，上传全部附件并校验每个文件的名称、大小、SHA-256，最后发布两端并从公开 URL 再逐文件比对。含 `-` 的 tag 标记为 prerelease 且不设 Latest；稳定版只在两端公开附件验证成功后设为 GitHub/CNB Latest。
 
 CNB URL 固定为 `https://cnb.cool/<CNB 组织>/<CNB 仓库>/-/releases/download/<tag>/<asset>`。安装器会写入该 tag 的 CNB 下载基址；国内传输失败才回退同一 tag 的 GitHub 固定地址，不使用可能漂移的 `latest`。已发布 CNB Release 不允许覆盖；失败会保留草稿供排查。
 
@@ -20,6 +20,7 @@ CNB URL 固定为 `https://cnb.cool/<CNB 组织>/<CNB 仓库>/-/releases/downloa
 - 让国内地址返回传输错误，确认 GitHub 后备成功。
 - 返回错误 SHA-256，确认安装终止且旧二进制未被替换。
 - 检查 `jkv version`、SBOM、attestation 和校验文件。
+- 从 CNB 安装公开稳定版，确认 `jkv s up` 成功 no-op；普通 `jkv s rm` 保留 candidates。
 
 ## 回滚
 

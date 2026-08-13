@@ -77,6 +77,20 @@ remove_managed_block() {
   rm -f "$tmp"
 }
 
+validate_managed_block_owner() {
+  [ -f "$rc" ] || return 0
+  block=$(awk -v begin="$MANAGED_BEGIN" -v end="$MANAGED_END" '
+    $0 == begin { managed=1 }
+    managed == 1 { print }
+    $0 == end { managed=0 }
+  ' "$rc")
+  [ -z "$block" ] && return 0
+  case "$block" in
+    *"$JKV_DIR"*) ;;
+    *) echo "shell 配置中的 jkv managed block 指向其他 JKV_DIR，拒绝修改: $rc" >&2; exit 1 ;;
+  esac
+}
+
 if [ "$action" = uninstall ]; then
   if [ "$purge" = true ]; then
     dangerous=false
@@ -99,6 +113,7 @@ if [ "$action" = uninstall ]; then
       case "$answer" in y|Y|yes|YES) ;; *) echo "已取消"; exit 0 ;; esac
     fi
   fi
+  validate_managed_block_owner
   remove_managed_block
   rm -f "$BIN_DIR/jkv"
   if [ "$purge" = true ]; then
@@ -192,6 +207,7 @@ chmod 755 "$BIN_DIR/jkv"
 if [ "$modify_profile" = true ]; then
   echo "将更新 shell 配置: $rc"
   mkdir -p "$(dirname "$rc")"
+  validate_managed_block_owner
   remove_managed_block
   {
     printf '\n%s\n' "$MANAGED_BEGIN"
@@ -213,6 +229,22 @@ if [ "$modify_profile" = true ]; then
   } >> "$rc"
   echo "已更新 shell 配置: $rc"
 fi
+
+receipt="$JKV_DIR/jkv-install.json"
+receipt_tmp=$(mktemp "$JKV_DIR/.jkv-receipt.XXXXXX")
+escaped_root=$(printf '%s' "$JKV_DIR" | sed 's/\\/\\\\/g; s/"/\\"/g')
+escaped_binary=$(printf '%s' "$BIN_DIR/jkv" | sed 's/\\/\\\\/g; s/"/\\"/g')
+{
+  printf '{\n  "schema_version": 1,\n  "root": "%s",\n  "binary": "%s",\n' "$escaped_root" "$escaped_binary"
+  if [ "$modify_profile" = true ]; then
+    escaped_profile=$(printf '%s' "$rc" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '  "managed_profiles": ["%s"]\n}\n' "$escaped_profile"
+  else
+    printf '  "managed_profiles": []\n}\n'
+  fi
+} > "$receipt_tmp"
+chmod 600 "$receipt_tmp"
+mv -f "$receipt_tmp" "$receipt"
 
 echo "jkv 已安装: $BIN_DIR/jkv"
 if [ "$shell_name" = fish ]; then

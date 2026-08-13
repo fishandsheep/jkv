@@ -18,6 +18,7 @@ var commandAliases = map[string]string{
 	"default": "default", "d": "default",
 	"current": "current", "c": "current",
 	"uninstall": "uninstall", "rm": "uninstall",
+	"self": "self", "s": "self",
 	"home": "home", "h": "home",
 	"env": "env", "e": "env",
 	"init": "init", "in": "init",
@@ -31,6 +32,7 @@ var commandAliases = map[string]string{
 var topLevelCompletions = []string{
 	"list", "ls", "install", "i", "repair", "use", "u", "default", "d", "current", "c",
 	"uninstall", "rm", "home", "h", "env", "e", "init", "in", "mirror", "m",
+	"self", "s",
 	"clean", "cl", "version", "v", "--version", "-v", "help", "--help", "-h",
 	"doctor",
 }
@@ -89,6 +91,13 @@ func completions(ctx context.Context, s *store.Store, args []string) []string {
 	case "current":
 		if len(args) == 2 {
 			return matching(candidates, prefix)
+		}
+	case "self":
+		if len(args) == 2 {
+			return matching([]string{"update", "up", "uninstall", "rm"}, prefix)
+		}
+		if len(args) >= 3 && (args[1] == "uninstall" || args[1] == "rm") {
+			return matching(remainingOptions(completed[1:], "--purge", "--yes"), prefix)
 		}
 	case "env":
 		if len(args) == 2 {

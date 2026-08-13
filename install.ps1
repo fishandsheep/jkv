@@ -27,6 +27,9 @@ function Remove-JkvTrailingDirectorySeparator {
   return $Path
 }
 
+$fullInstallDir = [IO.Path]::GetFullPath($InstallDir)
+$fullInstallDir = Remove-JkvTrailingDirectorySeparator $fullInstallDir
+
 function Remove-JkvProfileBlock {
   if (-not (Test-Path $PROFILE)) { return }
   $text = Get-Content $PROFILE -Raw
@@ -36,6 +39,12 @@ function Remove-JkvProfileBlock {
       ($beginMatches.Count -eq 1 -and $beginMatches[0].Index -gt $endMatches[0].Index)) {
     throw "PowerShell profile 中的 jkv managed block 不完整，拒绝修改: $PROFILE"
   }
+  if ($beginMatches.Count -eq 1) {
+    $block = $text.Substring($beginMatches[0].Index, $endMatches[0].Index + $managedEnd.Length - $beginMatches[0].Index)
+    if (-not $block.Contains($fullInstallDir)) {
+      throw "PowerShell profile 中的 jkv managed block 指向其他 JKV_DIR，拒绝修改: $PROFILE"
+    }
+  }
   $pattern = '(?ms)^' + [Regex]::Escape($managedBegin) + '\r?\n.*?^' +
     [Regex]::Escape($managedEnd) + '\r?\n?'
   $text = [Regex]::Replace($text, $pattern, '')
@@ -43,8 +52,6 @@ function Remove-JkvProfileBlock {
   Set-Content -Encoding utf8 $PROFILE ($lines -join [Environment]::NewLine)
 }
 
-$fullInstallDir = [IO.Path]::GetFullPath($InstallDir)
-$fullInstallDir = Remove-JkvTrailingDirectorySeparator $fullInstallDir
 $binDir = Join-Path $fullInstallDir 'bin'
 $target = Join-Path $binDir 'jkv.exe'
 
@@ -197,6 +204,18 @@ $managedEnd
   Add-Content -Encoding utf8 $PROFILE $block
   Write-Host "已更新 PowerShell 配置: $PROFILE"
 }
+
+$receipt = [ordered]@{
+  schema_version = 1
+  root = $fullInstallDir
+  binary = $target
+  managed_profiles = @($(if ($modifyProfile) { $PROFILE }))
+}
+$receiptPath = Join-Path $fullInstallDir 'jkv-install.json'
+$receiptTemp = Join-Path $fullInstallDir ".jkv-receipt-$([Guid]::NewGuid().ToString('N')).tmp"
+$receiptJson = $receipt | ConvertTo-Json -Depth 3
+[IO.File]::WriteAllText($receiptTemp, $receiptJson, (New-Object Text.UTF8Encoding($false)))
+Move-Item -Force $receiptTemp $receiptPath
 
 Write-Host "jkv 已安装: $target"
 Write-Host '重开 PowerShell，或运行: Invoke-Expression ((jkv init powershell) -join "`n")'

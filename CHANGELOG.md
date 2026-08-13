@@ -6,6 +6,41 @@
 
 后续版本变更将在此记录。
 
+## v0.0.2
+
+### Added
+
+- 新增 `jkv self update`（`jkv s up`）和 `jkv self uninstall`（`jkv s rm`）。
+- 安装器写入 schema v1 所有权收据；普通卸载保留 candidates、默认值、配置和缓存，`--purge` 提供确认与危险路径保护。
+- `list` 合并 Catalog 与本地安装；Catalog 已下架的 Java、Spring Boot 和其他 candidate 版本仍可见、可切换。
+- `list --json` 新增 `in_catalog`；仅本地版本使用 `availability_status="installed-only"`。
+
+### Security
+
+- 自身更新只管理 `$JKV_DIR/bin/jkv[.exe]`，拒绝开发版、非受管路径和版本回滚。
+- CNB 发现失败后回退 GitHub Latest；CNB 资产传输失败后回退同 tag GitHub。严格校验资产名和 SHA-256，校验失败不回退、不替换。
+- 自身卸载在任何删除前验证所有受管 profile block；重复、残缺或跨 `JKV_DIR` block 会终止。purge 永不接受 root、HOME 或 HOME 祖先目录。
+
+### Upgrade
+
+`v0.0.1` 用户需先运行一次 `v0.0.2` 安装器，写入所有权收据。之后可使用 `jkv self update`。
+
+### Representative output
+
+```text
+$ jkv version
+jkv v0.0.2
+
+$ jkv s up
+jkv 已是最新版: v0.0.2
+
+$ jkv list springboot
+本地安装
+----------------------------------------------------------------------------------------------------
+VERSION                          STATUS      TIER     INTEGRITY   AVAILABLE  SOURCE
+2.7.18                           installed   local    unknown     -          local
+```
+
 ## v0.0.1
 
 重置 jkv 发布基线，发布首个 `jkv (Java Kit Version)` 版本。

@@ -226,7 +226,9 @@ jobs:
             --data '{"draft":false,"make_latest":"false"}' >/dev/null
           published="$(curl -fsS "$api/$release_id" -H "Authorization: Bearer $CNB_TOKEN" -H 'Accept: application/vnd.cnb.api+json')"
           test "$(jq -er '.draft' <<<"$published")" = false
-          gh release edit "$GITHUB_REF_NAME" --draft=false
+          github_release_id="$(gh release view "$GITHUB_REF_NAME" --json id --jq .id)"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/$github_release_id" \
+            -F draft=false -F make_latest=false >/dev/null
       - name: Verify public GitHub and CNB bytes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -241,3 +243,20 @@ jobs:
             curl -fsSL "$base/$name" -o "cnb-public/$name"
             cmp "$file" "cnb-public/$name"
           done
+      - name: Mark stable release Latest after public verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CNB_TOKEN: ${{ secrets.CNB_JKV_TOKEN }}
+          CNB_REPOSITORY: ${{ vars.CNB_JKV_REPOSITORY }}
+        run: |
+          case "$GITHUB_REF_NAME" in *-*) exit 0 ;; esac
+          api="https://api.cnb.cool/${CNB_REPOSITORY}/-/releases"
+          release_id="$(cat cnb-release-id)"
+          curl -fsS -X PATCH "$api/$release_id" \
+            -H "Authorization: Bearer $CNB_TOKEN" \
+            -H 'Accept: application/vnd.cnb.api+json' \
+            -H 'Content-Type: application/json' \
+            --data '{"make_latest":"true"}' >/dev/null
+          github_release_id="$(gh release view "$GITHUB_REF_NAME" --json id --jq .id)"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/$github_release_id" \
+            -F make_latest=true >/dev/null

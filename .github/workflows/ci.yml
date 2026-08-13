@@ -43,6 +43,7 @@ jobs:
           check_coverage ./cmd/jkv 60
           check_coverage ./internal/catalog 70
           check_coverage ./internal/store 70
+          check_coverage ./internal/selfmanage 70
       - name: Staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2026.1
@@ -157,6 +158,34 @@ jobs:
         run: |
           go build -trimpath -o jkv-ci ./cmd/jkv
           ./jkv-ci version
+      - name: Run native self-update and uninstall
+        run: |
+          fixture="$RUNNER_TEMP/jkv-self-fixture"
+          root="$RUNNER_TEMP/jkv-self-root"
+          asset="jkv-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "$fixture/cnb/v0.0.2" "$root/bin" "$root/candidates/java/21"
+          go build -trimpath -ldflags '-X main.version=v0.0.2' -o "$fixture/cnb/v0.0.2/$asset" ./cmd/jkv
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$fixture/cnb/v0.0.2" && sha256sum "$asset" > "$asset.sha256")
+          else
+            (cd "$fixture/cnb/v0.0.2" && shasum -a 256 "$asset" > "$asset.sha256")
+          fi
+          test_ldflags="-X main.version=v0.0.1 -X main.selfCNBLatestURL=http://127.0.0.1:8766/latest -X main.selfCNBDownloadBase=http://127.0.0.1:8766/cnb"
+          go build -trimpath -ldflags "$test_ldflags" -o "$root/bin/jkv" ./cmd/jkv
+          printf '{"schema_version":1,"root":"%s","binary":"%s","managed_profiles":[]}\n' "$root" "$root/bin/jkv" > "$root/jkv-install.json"
+          printf '<svg><text>v0.0.2</text></svg>\n' > "$fixture/latest"
+          python3 -m http.server 8766 --bind 127.0.0.1 --directory "$fixture" >"$RUNNER_TEMP/jkv-self-http.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            curl -fsS http://127.0.0.1:8766/latest >/dev/null && break
+            sleep 1
+          done
+          JKV_DIR="$root" "$root/bin/jkv" self update
+          test "$("$root/bin/jkv" version)" = 'jkv v0.0.2'
+          JKV_DIR="$root" "$root/bin/jkv" self uninstall
+          test ! -e "$root/bin/jkv"
+          test -d "$root/candidates/java/21"
       - name: Run Unix source installer
         env:
           HOME: ${{ runner.temp }}/jkv-home
@@ -253,6 +282,38 @@ jobs:
           Invoke-Expression ((& (Join-Path $shellRoot 'bin\jkv.exe') init powershell) -join [Environment]::NewLine)
           jkv use java 21
           if ($env:JKV_CURRENT_JAVA -ne '21') { throw 'PowerShell use did not update current version' }
+      - name: Run native self-update and uninstall
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP 'jkv-self-fixture'
+          $root = Join-Path $env:RUNNER_TEMP 'jkv-self-root'
+          $asset = 'jkv-windows-${{ matrix.goarch }}.exe'
+          New-Item -ItemType Directory -Force (Join-Path $fixture 'cnb\v0.0.2'), (Join-Path $root 'bin'), (Join-Path $root 'candidates\java\21') | Out-Null
+          go build -trimpath -ldflags '-X main.version=v0.0.2' -o (Join-Path $fixture "cnb\v0.0.2\$asset") ./cmd/jkv
+          $assetPath = Join-Path $fixture "cnb\v0.0.2\$asset"
+          $hash = (Get-FileHash -Algorithm SHA256 $assetPath).Hash.ToLowerInvariant()
+          Set-Content -Encoding ascii "$assetPath.sha256" "$hash  $asset"
+          $testLdflags = '-X main.version=v0.0.1 -X main.selfCNBLatestURL=http://127.0.0.1:8766/latest -X main.selfCNBDownloadBase=http://127.0.0.1:8766/cnb'
+          go build -trimpath -ldflags $testLdflags -o (Join-Path $root 'bin\jkv.exe') ./cmd/jkv
+          [ordered]@{ schema_version = 1; root = $root; binary = (Join-Path $root 'bin\jkv.exe'); managed_profiles = @() } |
+            ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $root 'jkv-install.json')
+          Set-Content -Encoding ascii (Join-Path $fixture 'latest') '<svg><text>v0.0.2</text></svg>'
+          $server = Start-Process -FilePath python -ArgumentList @('-m', 'http.server', '8766', '--bind', '127.0.0.1') -WorkingDirectory $fixture -PassThru
+          try {
+            foreach ($attempt in 1..10) {
+              try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8766/latest | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+            }
+            $env:JKV_DIR = $root
+            & (Join-Path $root 'bin\jkv.exe') self update
+            Start-Sleep -Seconds 3
+            if ((& (Join-Path $root 'bin\jkv.exe') version) -ne 'jkv v0.0.2') { throw 'self-update did not replace binary' }
+            & (Join-Path $root 'bin\jkv.exe') self uninstall
+            Start-Sleep -Seconds 3
+            if (Test-Path (Join-Path $root 'bin\jkv.exe')) { throw 'self-uninstall left binary' }
+            if (-not (Test-Path (Join-Path $root 'candidates\java\21'))) { throw 'self-uninstall removed candidate' }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
       - name: Run PowerShell source installer
         shell: pwsh
         run: |

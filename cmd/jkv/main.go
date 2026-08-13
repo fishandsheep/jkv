@@ -21,19 +21,24 @@ import (
 	"unicode"
 
 	"github.com/fishandsheep/jkv/internal/catalog"
+	"github.com/fishandsheep/jkv/internal/selfmanage"
 	"github.com/fishandsheep/jkv/internal/store"
 )
 
 var version = "dev"
 
-// Release workflow injects these public values into release binaries. Environment
-// values remain available for development and emergency endpoint migration.
+// Release workflow injects catalog trust values into release binaries. Self
+// endpoint values are test seams; release binaries use the fixed HTTPS defaults.
 var (
 	catalogKeyID              = ""
 	catalogPublicKeyBase64    = ""
 	catalogCNBDownloadBase    = "https://cnb.cool/fishandsheep/jkv-catalog/-/releases/download"
 	catalogGitHubDownloadBase = "https://github.com/fishandsheep/jkv-catalog/releases/download"
 	catalogHTTPClient         = http.DefaultClient
+	selfCNBLatestURL          = ""
+	selfGitHubLatestURL       = ""
+	selfCNBDownloadBase       = ""
+	selfGitHubDownloadBase    = ""
 )
 
 func main() {
@@ -56,11 +61,17 @@ func exitCodeFor(err error) int {
 	switch {
 	case errors.Is(err, store.ErrIntegrity):
 		return exitIntegrity
+	case errors.Is(err, selfmanage.ErrIntegrity):
+		return exitIntegrity
 	case errors.Is(err, store.ErrNetwork), errors.Is(err, catalog.ErrNetwork):
 		return exitNetwork
+	case errors.Is(err, selfmanage.ErrNetwork):
+		return exitNetwork
+	case errors.Is(err, selfmanage.ErrState):
+		return exitState
 	case strings.HasPrefix(message, "用法:"),
 		strings.HasPrefix(message, "未知命令"),
-		strings.HasPrefix(message, "不支持选项"),
+		strings.Contains(message, "不支持选项"),
 		strings.HasPrefix(message, "不支持 candidate"):
 		return exitUsage
 	case strings.Contains(message, "SHA-256"),
@@ -114,6 +125,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdCurrent(ctx, s, args[1:])
 	case "uninstall", "rm":
 		return cmdUninstall(s, args[1:])
+	case "self", "s":
+		return cmdSelf(ctx, s, args[1:])
 	case "home", "h":
 		return cmdHome(ctx, s, args[1:])
 	case "env", "e":
@@ -184,6 +197,8 @@ func usage() {
   jkv default|d <candidate> <version>  设置默认版本
   jkv current|c [candidate]            显示当前生效版本
   jkv uninstall|rm <candidate> <ver>   卸载版本
+  jkv self|s update|up                 更新 jkv 自身
+  jkv self|s uninstall|rm [--purge]    卸载 jkv 自身
   jkv home|h <candidate> [version]     输出安装目录
   jkv env|e [init|apply|clear]          项目 .jkvrc 环境
   jkv init|in <bash|zsh|fish|powershell> 输出 shell hook 和补全
@@ -245,34 +260,40 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	installed, _ := s.Installed(candidate)
+	installed, installedErr := s.Installed(candidate)
+	if installedErr != nil {
+		return installedErr
+	}
 	defaults, _ := s.Defaults()
 	installedSet := map[string]bool{}
 	for _, v := range installed {
 		installedSet[v] = true
 	}
-	if len(releases) == 0 {
+	if len(releases) == 0 && len(installed) == 0 {
 		return fmt.Errorf("当前平台 %s/%s 暂无稳定国内源", runtime.GOOS, runtime.GOARCH)
 	}
+	listed := mergeInstalledReleases(s, candidate, releases, installed)
 	if optionsFromContext(ctx).JSON {
 		type listedRelease struct {
 			catalog.Release
 			Installed bool `json:"installed"`
 			Default   bool `json:"default"`
 			Current   bool `json:"current"`
+			InCatalog bool `json:"in_catalog"`
 		}
-		out := make([]listedRelease, 0, len(releases))
-		for _, release := range releases {
+		out := make([]listedRelease, 0, len(listed))
+		for _, release := range listed {
 			out = append(out, listedRelease{
 				Release:   release,
 				Installed: installedSet[release.Version],
 				Default:   defaults[candidate] == release.Version,
 				Current:   os.Getenv(currentVar(candidate)) == release.Version,
+				InCatalog: release.AvailabilityStatus != "installed-only",
 			})
 		}
 		return writeJSON(out)
 	}
-	groups := releaseGroups(candidate, releases)
+	groups := releaseGroups(candidate, listed)
 	for groupIndex, group := range groups {
 		if groupIndex > 0 {
 			fmt.Println()
@@ -292,14 +313,56 @@ func cmdList(ctx context.Context, s *store.Store, args []string) error {
 				status = "current"
 			}
 			available := "×"
-			if r.Available {
+			source := hostOf(r.URL)
+			if r.AvailabilityStatus == "installed-only" {
+				available = "-"
+				source = "local"
+			} else if r.Available {
 				available = "√"
 			}
 			fmt.Printf("%-32s %-11s %-8s %-11s %-10s %s\n",
-				r.Version, status, r.SupportTier, r.IntegrityLevel, available, hostOf(r.URL))
+				r.Version, status, r.SupportTier, r.IntegrityLevel, available, source)
 		}
 	}
 	return nil
+}
+
+func mergeInstalledReleases(s *store.Store, candidate string, releases []catalog.Release, installed []string) []catalog.Release {
+	out := append([]catalog.Release(nil), releases...)
+	inCatalog := make(map[string]bool, len(releases))
+	for _, release := range releases {
+		inCatalog[release.Version] = true
+	}
+	var local []catalog.Release
+	for _, installedVersion := range installed {
+		if inCatalog[installedVersion] {
+			continue
+		}
+		release, err := s.InstalledRelease(candidate, installedVersion)
+		if err != nil {
+			release = catalog.Release{Candidate: candidate, Version: installedVersion, Vendor: "local", SupportTier: "local", IntegrityLevel: "unknown"}
+		}
+		release.Candidate = candidate
+		release.Version = installedVersion
+		if release.Vendor == "" {
+			release.Vendor = "local"
+		}
+		if release.SupportTier == "" {
+			release.SupportTier = "local"
+		}
+		if release.IntegrityLevel == "" {
+			release.IntegrityLevel = "unknown"
+		}
+		release.URL = ""
+		release.Available = false
+		release.AvailabilityKnown = false
+		release.AvailabilityStatus = "installed-only"
+		local = append(local, release)
+	}
+	sort.SliceStable(local, func(i, j int) bool {
+		return catalog.VersionLess(local[j].Version, local[i].Version)
+	})
+	return append(out, local...)
 }
 
 type releaseGroup struct {
@@ -334,7 +397,7 @@ func releaseGroups(candidate string, releases []catalog.Release) []releaseGroup 
 }
 
 func vendorDisplay(vendor string) string {
-	if display := map[string]string{"temurin": "Temurin", "dragonwell": "Alibaba Dragonwell", "bisheng": "Huawei BiSheng"}[vendor]; display != "" {
+	if display := map[string]string{"temurin": "Temurin", "dragonwell": "Alibaba Dragonwell", "bisheng": "Huawei BiSheng", "local": "本地安装"}[vendor]; display != "" {
 		return display
 	}
 	return vendor
@@ -1036,6 +1099,63 @@ func cmdUninstall(s *store.Store, args []string) error {
 	}
 	fmt.Printf("已卸载: %s %s\n", args[0], v)
 	return nil
+}
+
+func cmdSelf(ctx context.Context, s *store.Store, args []string) error {
+	if len(args) == 0 {
+		return errors.New("用法: jkv self <update|uninstall>")
+	}
+	manager := selfmanage.New(selfmanage.Config{
+		Root:               s.Root,
+		CurrentVersion:     version,
+		StdinTerminal:      isTerminal(os.Stdin),
+		CNBLatestURL:       selfCNBLatestURL,
+		GitHubLatestURL:    selfGitHubLatestURL,
+		CNBDownloadBase:    selfCNBDownloadBase,
+		GitHubDownloadBase: selfGitHubDownloadBase,
+	})
+	switch args[0] {
+	case "update", "up":
+		if len(args) != 1 {
+			return errors.New("用法: jkv self update")
+		}
+		latest, changed, err := manager.Update(ctx)
+		if err != nil {
+			return err
+		}
+		if changed {
+			fmt.Printf("jkv 已更新: %s\n", latest)
+		} else {
+			fmt.Printf("jkv 已是最新版: %s\n", latest)
+		}
+		return nil
+	case "uninstall", "rm":
+		purge, yes := false, false
+		for _, arg := range args[1:] {
+			switch arg {
+			case "--purge":
+				purge = true
+			case "--yes":
+				yes = true
+			default:
+				return fmt.Errorf("self uninstall 不支持选项 %q", arg)
+			}
+		}
+		if yes && !purge {
+			return errors.New("用法: --yes 只能与 --purge 一起使用")
+		}
+		if err := manager.Uninstall(purge, yes); err != nil {
+			return err
+		}
+		if purge {
+			fmt.Printf("jkv 已彻底卸载: %s（不可恢复）\n", s.Root)
+		} else {
+			fmt.Printf("jkv 已卸载；已安装工具和配置保留在: %s\n", s.Root)
+		}
+		return nil
+	default:
+		return fmt.Errorf("未知命令 %q；用法: jkv self <update|uninstall>", args[0])
+	}
 }
 
 func cmdHome(ctx context.Context, s *store.Store, args []string) error {

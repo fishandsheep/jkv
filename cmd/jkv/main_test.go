@@ -62,6 +62,68 @@ func TestReleaseGroupsJavaVendorOrder(t *testing.T) {
 	}
 }
 
+func TestMergeInstalledReleasesPreservesCatalogAndLocalMetadata(t *testing.T) {
+	s := store.New(t.TempDir())
+	catalogReleases := []catalog.Release{
+		{Candidate: "java", Version: "21.0.2-tem", Vendor: "temurin", URL: "https://example.test/21"},
+		{Candidate: "java", Version: "17.0.9-tem", Vendor: "temurin", URL: "https://example.test/17"},
+	}
+	for _, version := range []string{"21.0.2-tem", "11.0.22-dragonwell", "8.0.2-local"} {
+		if err := os.MkdirAll(s.CandidateDir("java", version), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metadata := `{"schema_version":1,"release":{"candidate":"java","version":"11.0.22-dragonwell","vendor":"dragonwell","support_tier":"beta","integrity_level":"checksum","url":"https://example.test/old"}}`
+	if err := os.WriteFile(filepath.Join(s.CandidateDir("java", "11.0.22-dragonwell"), ".jkv-release.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.CandidateDir("java", "8.0.2-local"), ".jkv-release.json"), []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := mergeInstalledReleases(s, "java", catalogReleases, []string{"21.0.2-tem", "11.0.22-dragonwell", "8.0.2-local"})
+	if len(got) != 4 {
+		t.Fatalf("merged releases = %#v", got)
+	}
+	if got[0].Version != "21.0.2-tem" || got[1].Version != "17.0.9-tem" {
+		t.Fatalf("catalog order changed: %#v", got)
+	}
+	if got[2].Version != "11.0.22-dragonwell" || got[2].Vendor != "dragonwell" || got[2].IntegrityLevel != "checksum" || got[2].AvailabilityStatus != "installed-only" {
+		t.Fatalf("metadata local release = %#v", got[2])
+	}
+	if got[3].Version != "8.0.2-local" || got[3].Vendor != "local" || got[3].SupportTier != "local" {
+		t.Fatalf("fallback local release = %#v", got[3])
+	}
+	groups := releaseGroups("java", got)
+	if groups[len(groups)-1].vendor != "local" {
+		t.Fatalf("local group order = %#v", groups)
+	}
+}
+
+func TestListJSONIncludesInstalledOnlyContract(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("JKV_DIR", root)
+	t.Setenv("JKV_CURRENT_SPRINGBOOT", "")
+	s := store.New(root)
+	localVersion := "2.7.18"
+	if err := os.MkdirAll(s.CandidateDir("springboot", localVersion), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	remote := catalog.Release{Candidate: "springboot", Version: "3.5.1", Vendor: "spring", URL: "https://example.test/spring.zip", Available: true, AvailabilityKnown: true, AvailabilityStatus: "available"}
+	if err := s.SaveCatalog(catalog.CurrentPlatform(), "springboot", store.CatalogCache{FetchedAt: time.Now(), CheckedAt: time.Now(), Releases: []catalog.Release{remote}}); err != nil {
+		t.Fatal(err)
+	}
+	jsonContext := context.WithValue(context.Background(), cliOptionsKey{}, cliOptions{JSON: true})
+	output := captureStdout(t, func() error { return cmdList(jsonContext, s, []string{"springboot"}) })
+	var got []map[string]any
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0]["in_catalog"] != true || got[1]["in_catalog"] != false || got[1]["installed"] != true || got[1]["availability_known"] != false || got[1]["availability_status"] != "installed-only" {
+		t.Fatalf("list JSON = %#v", got)
+	}
+}
+
 func TestInstalledVersionCompletionSupportsAliases(t *testing.T) {
 	s := store.New(t.TempDir())
 	version := "21.0.1-tem"
@@ -103,6 +165,24 @@ func TestStaticArgumentCompletionsIncludeAcceptedAliases(t *testing.T) {
 	s := store.New(t.TempDir())
 	if got := completions(context.Background(), s, []string{"init", "p"}); !slices.Equal(got, []string{"powershell", "pwsh"}) {
 		t.Fatalf("init completion = %v", got)
+	}
+}
+
+func TestSelfCommandAliasesAndCompletions(t *testing.T) {
+	if commandAliases["self"] != "self" || commandAliases["s"] != "self" {
+		t.Fatalf("self aliases = %#v", commandAliases)
+	}
+	s := store.New(t.TempDir())
+	if got := completions(context.Background(), s, []string{"s", "u"}); !slices.Equal(got, []string{"uninstall", "up", "update"}) {
+		t.Fatalf("self subcommand completion = %v", got)
+	}
+	if got := completions(context.Background(), s, []string{"self", "rm", "--"}); !slices.Equal(got, []string{"--purge", "--yes"}) {
+		t.Fatalf("self option completion = %v", got)
+	}
+	for _, args := range [][]string{{"update", "extra"}, {"up", "extra"}, {"uninstall", "--bad"}, {"rm", "--yes"}} {
+		if err := cmdSelf(context.Background(), s, args); err == nil {
+			t.Fatalf("cmdSelf(%v) accepted invalid arguments", args)
+		}
 	}
 }
 
@@ -316,6 +396,7 @@ func TestInitFishEmitsFunctionAndCompletion(t *testing.T) {
 func TestRunCurrentJSON(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("JKV_DIR", root)
+	t.Setenv("JKV_CURRENT_JAVA", "")
 	s := store.New(root)
 	if err := os.MkdirAll(s.CandidateDir("java", "21.0.1-tem"), 0o755); err != nil {
 		t.Fatal(err)
@@ -462,6 +543,7 @@ func TestExitCodeCategories(t *testing.T) {
 func TestInstalledCommandWorkflow(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("JKV_DIR", root)
+	t.Setenv("JKV_CURRENT_JAVA", "")
 	s := store.New(root)
 	for candidate, version := range map[string]string{"java": "21.0.1-tem", "maven": "3.9.11"} {
 		if err := os.MkdirAll(filepath.Join(s.CandidateDir(candidate, version), "bin"), 0o755); err != nil {

@@ -26,6 +26,8 @@ jkv 尊重系统 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 和系统 CA。检查
 
 失败不会静默切换 Java 生态工具到 GitHub。安装 jkv 本身时，国内制品传输失败才会使用 GitHub 后备；SHA-256 不匹配会立即终止。
 
+`jkv self update` 只管理安装器放在 `$JKV_DIR/bin/jkv[.exe]` 的稳定版。若提示“当前二进制不由 JKV_DIR 管理”或“开发版不能自行更新”，请使用原安装方式升级。`v0.0.1` 需先运行一次 `v0.0.2` 安装器。
+
 ## 安装损坏
 
 ```sh
@@ -43,6 +45,8 @@ jkv clean catalog
 ```
 
 `--dry-run` 只列出将删除的路径。删除已安装版本使用 `jkv uninstall`。
+
+在线 Catalog 下架的已安装版本仍由 `jkv list <candidate>` 显示，`AVAILABLE` 为 `-`、`SOURCE` 为 `local`。Catalog 和可信缓存都不可用时，`list` 仍报错，不会把本地目录伪装成可信 Catalog。
 
 ## 报告问题
 

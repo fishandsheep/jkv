@@ -649,6 +649,13 @@ func uniqueSorted(in []Release, limit int) []Release {
 	return out
 }
 
+// VersionLess compares version strings using the numeric ordering used by the
+// built-in providers. It is also used when clients append installed-only
+// releases after catalog results.
+func VersionLess(a, b string) bool {
+	return versionLess(a, b)
+}
+
 func parallelReleases[T any](items []T, limit int, fn func(T) []Release) []Release {
 	if limit < 1 {
 		limit = 1
