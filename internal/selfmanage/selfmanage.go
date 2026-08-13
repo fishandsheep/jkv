@@ -595,6 +595,29 @@ func blockOwnsRoot(block, root string) bool {
 			return true
 		}
 	}
+	// Installers may write the lexical JKV_DIR path while receipt validation
+	// canonicalizes through a platform symlink (notably macOS /var -> /private/var).
+	// Resolve only explicit JKV_DIR assignments; arbitrary text must not establish
+	// ownership of a managed block.
+	for _, line := range strings.Split(block, "\n") {
+		marker := strings.Index(line, "JKV_DIR")
+		if marker < 0 {
+			continue
+		}
+		value := line[marker+len("JKV_DIR"):]
+		if equal := strings.IndexByte(value, '='); equal >= 0 {
+			value = value[equal+1:]
+		}
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, "'\"")
+		value = strings.TrimSpace(strings.TrimSuffix(value, ";"))
+		if value == "" {
+			continue
+		}
+		if canonical, err := canonicalPath(value); err == nil && samePath(canonical, root) {
+			return true
+		}
+	}
 	return false
 }
 

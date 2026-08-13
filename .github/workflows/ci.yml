@@ -305,11 +305,19 @@ jobs:
             }
             $env:JKV_DIR = $root
             & (Join-Path $root 'bin\jkv.exe') self update
-            Start-Sleep -Seconds 3
-            if ((& (Join-Path $root 'bin\jkv.exe') version) -ne 'jkv v0.0.2') { throw 'self-update did not replace binary' }
+            $updated = $false
+            foreach ($attempt in 1..15) {
+              if ((& (Join-Path $root 'bin\jkv.exe') version) -eq 'jkv v0.0.2') { $updated = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $updated) { throw 'self-update did not replace binary' }
             & (Join-Path $root 'bin\jkv.exe') self uninstall
-            Start-Sleep -Seconds 3
-            if (Test-Path (Join-Path $root 'bin\jkv.exe')) { throw 'self-uninstall left binary' }
+            $removed = $false
+            foreach ($attempt in 1..15) {
+              if (-not (Test-Path (Join-Path $root 'bin\jkv.exe'))) { $removed = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $removed) { throw 'self-uninstall left binary' }
             if (-not (Test-Path (Join-Path $root 'candidates\java\21'))) { throw 'self-uninstall removed candidate' }
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
