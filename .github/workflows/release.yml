@@ -60,7 +60,7 @@ jobs:
           esac
           mkdir -p dist
           name="jkv-${GOOS}-${GOARCH}${{ matrix.ext }}"
-          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.catalogKeyID=${CATALOG_KEY_ID} -X main.catalogPublicKeyBase64=${CATALOG_PUBLIC_KEY}" -o "dist/$name" ./cmd/jkv
+          go build -buildvcs=false -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.catalogKeyID=${CATALOG_KEY_ID} -X main.catalogPublicKeyBase64=${CATALOG_PUBLIC_KEY}" -o "dist/$name" ./cmd/jkv
           (cd dist && sha256sum "$name" > "$name.sha256")
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
@@ -156,6 +156,7 @@ jobs:
               --notes-file "$notes" \
               "${flags[@]}"
           fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
           mkdir github-draft
           gh release download "$GITHUB_REF_NAME" --dir github-draft --pattern '*'
           for file in dist/*; do
@@ -193,9 +194,7 @@ jobs:
             curl -fsS -X PUT --upload-file "$file" "$(jq -er '.upload_url' <<<"$ticket")"
             curl -fsS -X POST "${headers[@]}" "$(jq -er '.verify_url' <<<"$ticket")?ttl=0"
           }
-          if test "$(jq -er '.draft' <<<"$existing")" = true || test -z "$existing"; then
-            for file in dist/*; do upload "$file"; done
-          fi
+          for file in dist/*; do upload "$file"; done
           release_after_upload="$(curl -fsS "$api/$release_id" "${headers[@]}")"
           verify_cnb_asset() {
             file="$1"
