@@ -144,15 +144,18 @@ jobs:
             exit 1
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "GitHub release already exists: $GITHUB_REF_NAME" >&2
-            exit 1
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true || {
+              echo "GitHub release already published: $GITHUB_REF_NAME" >&2
+              exit 1
+            }
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --verify-tag \
+              --draft \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$notes" \
+              "${flags[@]}"
           fi
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag \
-            --draft \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file "$notes" \
-            "${flags[@]}"
           mkdir github-draft
           gh release download "$GITHUB_REF_NAME" --dir github-draft --pattern '*'
           for file in dist/*; do
@@ -181,8 +184,7 @@ jobs:
               --data "$(jq -nc --arg tag "$GITHUB_REF_NAME" --arg commit "$GITHUB_SHA" '{tag_name:$tag,target_commitish:"main",name:$tag,body:("jkv release from GitHub commit " + $commit),draft:true,make_latest:"false"}')")"
             release_id="$(jq -er '.id' <<<"$release")"
           elif test "$(jq -er '.draft' <<<"$existing")" != true; then
-            echo "CNB release already published and immutable: $GITHUB_REF_NAME" >&2
-            exit 1
+            echo "CNB release already published; verify existing assets: $GITHUB_REF_NAME"
           fi
           upload() {
             file="$1"
@@ -191,7 +193,9 @@ jobs:
             curl -fsS -X PUT --upload-file "$file" "$(jq -er '.upload_url' <<<"$ticket")"
             curl -fsS -X POST "${headers[@]}" "$(jq -er '.verify_url' <<<"$ticket")?ttl=0"
           }
-          for file in dist/*; do upload "$file"; done
+          if test "$(jq -er '.draft' <<<"$existing")" = true || test -z "$existing"; then
+            for file in dist/*; do upload "$file"; done
+          fi
           release_after_upload="$(curl -fsS "$api/$release_id" "${headers[@]}")"
           verify_cnb_asset() {
             file="$1"
@@ -226,7 +230,7 @@ jobs:
             --data '{"draft":false,"make_latest":"false"}' >/dev/null
           published="$(curl -fsS "$api/$release_id" -H "Authorization: Bearer $CNB_TOKEN" -H 'Accept: application/vnd.cnb.api+json')"
           test "$(jq -er '.draft' <<<"$published")" = false
-          github_release_id="$(gh release view "$GITHUB_REF_NAME" --json id --jq .id)"
+          github_release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate | jq -er --arg tag "$GITHUB_REF_NAME" '.[] | select(.tag_name == $tag) | .id')"
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/$github_release_id" \
             -F draft=false -F make_latest=false >/dev/null
       - name: Verify public GitHub and CNB bytes
@@ -257,6 +261,6 @@ jobs:
             -H 'Accept: application/vnd.cnb.api+json' \
             -H 'Content-Type: application/json' \
             --data '{"make_latest":"true"}' >/dev/null
-          github_release_id="$(gh release view "$GITHUB_REF_NAME" --json id --jq .id)"
+          github_release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate | jq -er --arg tag "$GITHUB_REF_NAME" '.[] | select(.tag_name == $tag) | .id')"
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/$github_release_id" \
             -F make_latest=true >/dev/null
