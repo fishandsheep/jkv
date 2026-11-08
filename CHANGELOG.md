@@ -6,6 +6,28 @@
 
 后续版本变更将在此记录。
 
+## v0.0.3
+
+### Breaking
+
+- 移除内置镜像抓取 provider 与 `JKV_LEGACY_PROVIDER`、`JKV_EXPERIMENTAL_CATALOG` 环境变量；签名 Catalog 成为唯一版本来源。源码构建无编译期信任密钥，`list <工具>`/`install` 需配置 `JKV_CATALOG_KEY_ID` 与 `JKV_CATALOG_PUBLIC_KEY`。
+- `jkv clean` 的 `catalog` 类型移除；裸 `jkv clean` 清理下载缓存并顺带清理旧版遗留的每工具缓存，可信 Catalog 状态（`cache/trusted-catalog.json`）不再被清理（此前裸清理会将其删除）。
+- `jkv doctor --json` 移除 `catalog` 字段（遗留 per-工具缓存检查）；`catalog_trust` 保留。
+
+### Changed
+
+- 用户可见文案统一使用「工具」，不再暴露 "candidate" 术语；任一命令支持 `-h`/`--help` 单项用法。
+- `list <工具>` 默认精简为 `VERSION/STATUS/AVAILABLE` 三列，`--verbose` 追加 `TIER/INTEGRITY/SOURCE`；`--json` 输出不变。
+- `install` 版本前缀命中多个发行商时固定优先 Temurin，与省略版本时的选择一致；`21-dragonwell` 等显式后缀行为不变。
+- `env clear` 现在输出真正的撤销命令（unset 各 `*_HOME` 与 `JKV_CURRENT_*`、从 `PATH` 移除 jkv 管理目录；保留 `JKV_DIR`），此前与不带参数的 `env` 行为重复。
+- `mirror maven` 不带 `--apply` 不再预写 `settings-jkv.xml`，与 gradle 一致：预览只打印内容与目标路径，`--apply` 才落盘。
+- 退出码改为类型化错误判定（usage/notFound/state/integrity + store 哨兵），不再依赖错误文本匹配；退出码表不变。
+- `install.sh` 与 `install.ps1` 支持 `--help`/`-Help` 查看安装器用法；未知选项错误提示帮助入口。
+
+### Removed
+
+- 删除每日 `mirror-health` 工作流；provider 镜像健康检查按路线图归 jkv-catalog 仓库负责。
+
 ## v0.0.2
 
 ### Added
