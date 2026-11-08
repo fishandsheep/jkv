@@ -116,9 +116,9 @@ func completions(ctx context.Context, s *store.Store, args []string) []string {
 		}
 	case "clean":
 		if len(args) == 2 {
-			return matching([]string{"downloads", "catalog", "partials", "--dry-run", "--older-than"}, prefix)
+			return matching([]string{"downloads", "partials", "--dry-run", "--older-than"}, prefix)
 		}
-		if len(args) == 3 && (args[1] == "downloads" || args[1] == "catalog" || args[1] == "partials") {
+		if len(args) == 3 && (args[1] == "downloads" || args[1] == "partials") {
 			return matching(candidates, prefix)
 		}
 		if len(args) == 4 && (args[1] == "downloads" || args[1] == "partials") && catalog.IsCandidate(args[2]) {
@@ -130,7 +130,7 @@ func completions(ctx context.Context, s *store.Store, args []string) []string {
 
 func installVersions(ctx context.Context, s *store.Store, candidate string) []string {
 	versions := append([]string{"latest"}, s.CachedVersions(candidate)...)
-	if releases, err := loadReleases(ctx, s, candidate, false, false, true); err == nil {
+	if releases, err := loadReleases(ctx, s, candidate, false, true); err == nil {
 		for _, release := range releases {
 			versions = append(versions, release.Version)
 		}

@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,13 +16,6 @@ import (
 
 	"github.com/fishandsheep/jkv/internal/catalog"
 )
-
-type CatalogCache struct {
-	SchemaVersion int               `json:"schema_version"`
-	FetchedAt     time.Time         `json:"fetched_at"`
-	CheckedAt     time.Time         `json:"checked_at,omitempty"`
-	Releases      []catalog.Release `json:"releases"`
-}
 
 // TrustedCatalogSnapshot stores exact signed bytes after client verification.
 // The current snapshot and two predecessors remain available for offline use.
@@ -38,8 +30,9 @@ type TrustedCatalogSnapshot struct {
 	LatestSignature   []byte    `json:"latest_signature"`
 }
 
-// TrustedCatalogState is separate from disposable per-candidate catalog cache.
-// HighestSequence and cumulative revocations survive cache cleanup.
+// TrustedCatalogState is the only catalog store. Cache cleanup never removes
+// it: HighestSequence and cumulative revocations are security state, not
+// disposable cache.
 type TrustedCatalogState struct {
 	SchemaVersion   int                      `json:"schema_version"`
 	HighestSequence uint64                   `json:"highest_sequence"`
@@ -60,10 +53,6 @@ type CleanResult struct {
 
 func (s *Store) cacheRoot() string { return filepath.Join(s.Root, "cache") }
 
-func (s *Store) catalogCachePath(p catalog.Platform, candidate string) string {
-	return filepath.Join(s.cacheRoot(), "catalog", p.OS+"-"+p.Arch, candidate+".json")
-}
-
 func (s *Store) trustedCatalogPath() string {
 	return filepath.Join(s.cacheRoot(), "trusted-catalog.json")
 }
@@ -82,7 +71,7 @@ func (s *Store) loadTrustedCatalog() (TrustedCatalogState, error) {
 		return TrustedCatalogState{}, err
 	}
 	if state.SchemaVersion > stateSchemaVersion {
-		return TrustedCatalogState{}, fmt.Errorf("不支持 trusted catalog schema %d", state.SchemaVersion)
+		return TrustedCatalogState{}, stateErrorf("不支持 trusted catalog schema %d", state.SchemaVersion)
 	}
 	if err := validateTrustedCatalogState(state); err != nil {
 		return TrustedCatalogState{}, err
@@ -113,7 +102,7 @@ func (s *Store) SaveTrustedCatalog(state TrustedCatalogState) error {
 
 func mergeTrustedCatalogState(persisted, incoming TrustedCatalogState) (TrustedCatalogState, error) {
 	if incoming.HighestSequence < persisted.HighestSequence {
-		return TrustedCatalogState{}, fmt.Errorf("拒绝 trusted catalog 回滚：sequence %d 低于已见 %d", incoming.HighestSequence, persisted.HighestSequence)
+		return TrustedCatalogState{}, stateErrorf("拒绝 trusted catalog 回滚：sequence %d 低于已见 %d", incoming.HighestSequence, persisted.HighestSequence)
 	}
 	bySequence := make(map[uint64]TrustedCatalogSnapshot, len(persisted.Snapshots)+len(incoming.Snapshots))
 	for _, snapshot := range persisted.Snapshots {
@@ -122,11 +111,11 @@ func mergeTrustedCatalogState(persisted, incoming TrustedCatalogState) (TrustedC
 	seenIncoming := make(map[uint64]bool, len(incoming.Snapshots))
 	for _, snapshot := range incoming.Snapshots {
 		if seenIncoming[snapshot.Sequence] {
-			return TrustedCatalogState{}, fmt.Errorf("duplicate trusted catalog sequence %d", snapshot.Sequence)
+			return TrustedCatalogState{}, stateErrorf("duplicate trusted catalog sequence %d", snapshot.Sequence)
 		}
 		seenIncoming[snapshot.Sequence] = true
 		if known, exists := bySequence[snapshot.Sequence]; exists && !sameTrustedSnapshot(known, snapshot) {
-			return TrustedCatalogState{}, fmt.Errorf("拒绝 trusted catalog：sequence %d 对应不同字节", snapshot.Sequence)
+			return TrustedCatalogState{}, stateErrorf("拒绝 trusted catalog：sequence %d 对应不同字节", snapshot.Sequence)
 		}
 		bySequence[snapshot.Sequence] = snapshot
 	}
@@ -203,10 +192,10 @@ func validateTrustedCatalogState(state TrustedCatalogState) error {
 	for _, snapshot := range state.Snapshots {
 		if snapshot.Sequence == 0 || snapshot.Endpoint == "" || snapshot.FetchedAt.IsZero() ||
 			len(snapshot.Snapshot) == 0 || len(snapshot.SnapshotSignature) == 0 || len(snapshot.Latest) == 0 || len(snapshot.LatestSignature) == 0 {
-			return errors.New("invalid trusted catalog snapshot")
+			return stateErrorf("invalid trusted catalog snapshot")
 		}
 		if seen[snapshot.Sequence] {
-			return fmt.Errorf("duplicate trusted catalog sequence %d", snapshot.Sequence)
+			return stateErrorf("duplicate trusted catalog sequence %d", snapshot.Sequence)
 		}
 		seen[snapshot.Sequence] = true
 		if snapshot.Sequence > max {
@@ -214,40 +203,9 @@ func validateTrustedCatalogState(state TrustedCatalogState) error {
 		}
 	}
 	if max > state.HighestSequence {
-		return errors.New("trusted catalog highest sequence is lower than a stored snapshot")
+		return stateErrorf("trusted catalog highest sequence is lower than a stored snapshot")
 	}
 	return nil
-}
-
-func (s *Store) LoadCatalog(p catalog.Platform, candidate string) (CatalogCache, error) {
-	b, err := os.ReadFile(s.catalogCachePath(p, candidate))
-	if err != nil {
-		return CatalogCache{}, err
-	}
-	var cached CatalogCache
-	if err := json.Unmarshal(b, &cached); err != nil {
-		return CatalogCache{}, err
-	}
-	if cached.SchemaVersion > stateSchemaVersion {
-		return CatalogCache{}, fmt.Errorf("不支持 catalog schema %d", cached.SchemaVersion)
-	}
-	return cached, nil
-}
-
-func (s *Store) SaveCatalog(p catalog.Platform, candidate string, cached CatalogCache) error {
-	lock, err := s.acquireLock(context.Background(), "cache")
-	if err != nil {
-		return err
-	}
-	defer lock.release()
-	if cached.SchemaVersion == 0 {
-		cached.SchemaVersion = stateSchemaVersion
-	}
-	b, err := json.MarshalIndent(cached, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWrite(s.catalogCachePath(p, candidate), append(b, '\n'), 0o644)
 }
 
 func validSegment(s string) bool {
@@ -530,95 +488,46 @@ func (s *Store) olderCachePaths(kind, candidate, version string, age time.Durati
 	if age <= 0 {
 		return nil, os.ErrInvalid
 	}
-	if kind == "" {
-		downloads, err := s.olderCachePaths("downloads", candidate, version, age)
-		if err != nil {
-			return nil, err
-		}
-		catalogs, err := s.olderCachePaths("catalog", candidate, "", age)
-		return append(downloads, catalogs...), err
-	}
-	if kind != "downloads" && kind != "catalog" {
+	if kind != "downloads" {
 		return nil, os.ErrInvalid
 	}
 	if candidate != "" && !validSegment(candidate) {
 		return nil, os.ErrInvalid
 	}
-	if version != "" && (kind != "downloads" || candidate == "" || !validSegment(version)) {
+	if version != "" && (candidate == "" || !validSegment(version)) {
 		return nil, os.ErrInvalid
 	}
 	var candidates []string
-	if kind == "downloads" {
-		root := filepath.Join(s.cacheRoot(), "downloads")
-		if candidate != "" {
-			root = filepath.Join(root, candidate)
-		}
-		if version != "" {
-			candidates = append(candidates, filepath.Join(root, version))
-		} else {
-			if candidate == "" {
-				entries, err := os.ReadDir(root)
-				if os.IsNotExist(err) {
-					return nil, nil
-				}
-				if err != nil {
-					return nil, err
-				}
-				for _, candidateEntry := range entries {
-					if !candidateEntry.IsDir() {
-						continue
-					}
-					versionEntries, readErr := os.ReadDir(filepath.Join(root, candidateEntry.Name()))
-					if readErr != nil {
-						return nil, readErr
-					}
-					for _, versionEntry := range versionEntries {
-						if versionEntry.IsDir() {
-							candidates = append(candidates, filepath.Join(root, candidateEntry.Name(), versionEntry.Name()))
-						}
-					}
-				}
-			} else {
-				entries, err := os.ReadDir(root)
-				if os.IsNotExist(err) {
-					return nil, nil
-				}
-				if err != nil {
-					return nil, err
-				}
-				for _, entry := range entries {
-					if entry.IsDir() {
-						candidates = append(candidates, filepath.Join(root, entry.Name()))
-					}
-				}
-			}
-		}
+	root := filepath.Join(s.cacheRoot(), "downloads")
+	if candidate != "" {
+		root = filepath.Join(root, candidate)
+	}
+	if version != "" {
+		candidates = append(candidates, filepath.Join(root, version))
 	} else {
-		root := filepath.Join(s.cacheRoot(), "catalog")
-		platforms, err := os.ReadDir(root)
+		entries, err := os.ReadDir(root)
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		if err != nil {
 			return nil, err
 		}
-		for _, platform := range platforms {
-			if !platform.IsDir() {
+		for _, entry := range entries {
+			if !entry.IsDir() {
 				continue
 			}
-			dir := filepath.Join(root, platform.Name())
-			if candidate != "" {
-				candidates = append(candidates, filepath.Join(dir, candidate+".json"))
-				continue
-			}
-			entries, readErr := os.ReadDir(dir)
-			if readErr != nil {
-				return nil, readErr
-			}
-			for _, entry := range entries {
-				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
-					candidates = append(candidates, filepath.Join(dir, entry.Name()))
+			if candidate == "" {
+				versionEntries, readErr := os.ReadDir(filepath.Join(root, entry.Name()))
+				if readErr != nil {
+					return nil, readErr
 				}
+				for _, versionEntry := range versionEntries {
+					if versionEntry.IsDir() {
+						candidates = append(candidates, filepath.Join(root, entry.Name(), versionEntry.Name()))
+					}
+				}
+			} else {
+				candidates = append(candidates, filepath.Join(root, entry.Name()))
 			}
 		}
 	}
@@ -659,8 +568,11 @@ func newestModTime(path string) (time.Time, bool, error) {
 }
 
 func (s *Store) cachePaths(kind, candidate, version string) ([]string, error) {
+	// kind "" cleans downloads plus leftover per-candidate caches from older
+	// jkv releases. Partials need an age gate and trusted-catalog.json is
+	// protected security state, so neither is included.
 	if kind == "" {
-		return []string{s.cacheRoot()}, nil
+		return []string{filepath.Join(s.cacheRoot(), "downloads"), filepath.Join(s.cacheRoot(), "catalog")}, nil
 	}
 	if kind == "downloads" {
 		path := filepath.Join(s.cacheRoot(), "downloads")
@@ -677,30 +589,6 @@ func (s *Store) cachePaths(kind, candidate, version string) ([]string, error) {
 			path = filepath.Join(path, version)
 		}
 		return []string{path}, nil
-	}
-	if kind == "catalog" {
-		root := filepath.Join(s.cacheRoot(), "catalog")
-		if candidate == "" {
-			return []string{root}, nil
-		}
-		if !validSegment(candidate) {
-			return nil, os.ErrInvalid
-		}
-		entries, err := os.ReadDir(root)
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		var paths []string
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			paths = append(paths, filepath.Join(root, entry.Name(), candidate+".json"))
-		}
-		return paths, nil
 	}
 	return nil, os.ErrInvalid
 }

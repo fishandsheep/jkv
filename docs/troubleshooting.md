@@ -22,7 +22,7 @@ PowerShell 使用 `Invoke-Expression ((jkv init powershell) -join "`n")`。
 
 ## 下载或镜像失败
 
-jkv 尊重系统 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 和系统 CA。检查代理是否允许目标域名。`jkv list <candidate> --refresh --verbose` 跳过本地 catalog 缓存。
+jkv 尊重系统 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 和系统 CA。检查代理是否允许目标域名。`jkv list <工具> --refresh` 重新拉取签名 Catalog。
 
 失败不会静默切换 Java 生态工具到 GitHub。安装 jkv 本身时，国内制品传输失败才会使用 GitHub 后备；SHA-256 不匹配会立即终止。
 
@@ -31,7 +31,7 @@ jkv 尊重系统 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 和系统 CA。检查
 ## 安装损坏
 
 ```sh
-jkv repair <candidate> <version>
+jkv repair <工具> <version>
 ```
 
 修复使用临时目录和原子替换；失败时保留原安装。并发操作由 `$JKV_DIR/locks` 中的跨进程锁串行化。
@@ -46,7 +46,7 @@ jkv clean catalog
 
 `--dry-run` 只列出将删除的路径。删除已安装版本使用 `jkv uninstall`。
 
-在线 Catalog 下架的已安装版本仍由 `jkv list <candidate>` 显示，`AVAILABLE` 为 `-`、`SOURCE` 为 `local`。Catalog 和可信缓存都不可用时，`list` 仍报错，不会把本地目录伪装成可信 Catalog。
+在线 Catalog 下架的已安装版本仍由 `jkv list <工具>` 显示，`AVAILABLE` 为 `-`、`SOURCE` 为 `local`。Catalog 和可信缓存都不可用时，`list` 仍报错，不会把本地目录伪装成可信 Catalog。
 
 ## 报告问题
 

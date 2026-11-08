@@ -602,29 +602,45 @@ func TestVerifyChecksumRejectsNonHexDigest(t *testing.T) {
 	}
 }
 
-func TestCatalogCacheAndClean(t *testing.T) {
+func TestCleanCacheProtectsTrustedCatalogState(t *testing.T) {
 	s := New(t.TempDir())
-	p := catalog.Platform{OS: "linux", Arch: "x64"}
-	want := CatalogCache{
-		FetchedAt: time.Now(),
-		Releases:  []catalog.Release{{Candidate: "java", Version: "21-test", URL: "https://example.com/jdk.zip"}},
-	}
-	if err := s.SaveCatalog(p, "java", want); err != nil {
+	downloads := filepath.Join(s.cacheRoot(), "downloads", "java", "21-test", "archive")
+	if err := os.MkdirAll(filepath.Dir(downloads), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.LoadCatalog(p, "java")
-	if err != nil || len(got.Releases) != 1 || got.Releases[0].Version != "21-test" {
-		t.Fatalf("cache=%#v err=%v", got, err)
+	if err := os.WriteFile(downloads, []byte("archive"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	result, err := s.CleanCache("catalog", "java", "")
+	legacyCatalog := filepath.Join(s.cacheRoot(), "catalog", "linux-x64", "java.json")
+	if err := os.MkdirAll(filepath.Dir(legacyCatalog), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyCatalog, []byte(`{"releases":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := TrustedCatalogState{SchemaVersion: stateSchemaVersion, HighestSequence: 7, Snapshots: []TrustedCatalogSnapshot{trustedSnapshotForTest(7, time.Now())}}
+	if err := s.SaveTrustedCatalog(state); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.CleanCache("", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Files != 1 || result.Bytes == 0 {
+	if result.Files != 2 {
 		t.Fatalf("clean result = %#v", result)
 	}
-	if _, err := s.LoadCatalog(p, "java"); !os.IsNotExist(err) {
-		t.Fatalf("cache remains: %v", err)
+	if _, err := os.Stat(downloads); !os.IsNotExist(err) {
+		t.Fatalf("downloads cache remains: %v", err)
+	}
+	if _, err := os.Stat(legacyCatalog); !os.IsNotExist(err) {
+		t.Fatalf("legacy catalog cache remains: %v", err)
+	}
+	if _, err := s.LoadTrustedCatalog(); err != nil {
+		t.Fatalf("trusted catalog state removed by clean: %v", err)
+	}
+	if _, err := s.CleanCache("catalog", "", ""); err == nil {
+		t.Fatal("catalog kind still accepted")
 	}
 }
 
@@ -661,11 +677,11 @@ func TestTrustedCatalogCacheKeepsSnapshotsAndRevocations(t *testing.T) {
 	if _, revoked, err := s.ArtifactRevocation(""); err != nil || revoked {
 		t.Fatalf("empty revocation = %t, %v", revoked, err)
 	}
-	if _, err := s.CleanCache("catalog", "", ""); err != nil {
+	if _, err := s.CleanCache("", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.LoadTrustedCatalog(); err != nil {
-		t.Fatalf("catalog clean removed trusted state: %v", err)
+		t.Fatalf("cache clean removed trusted state: %v", err)
 	}
 }
 
@@ -757,17 +773,6 @@ func trustedSnapshotForTest(sequence uint64, fetchedAt time.Time) TrustedCatalog
 
 func TestRejectsFutureStateSchemas(t *testing.T) {
 	s := New(t.TempDir())
-	p := catalog.Platform{OS: "linux", Arch: "x64"}
-	catalogPath := s.catalogCachePath(p, "java")
-	if err := os.MkdirAll(filepath.Dir(catalogPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(catalogPath, []byte(`{"schema_version":999,"releases":[]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.LoadCatalog(p, "java"); err == nil {
-		t.Fatal("future catalog schema accepted")
-	}
 	installDir := s.CandidateDir("java", "21")
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
 		t.Fatal(err)

@@ -2,7 +2,7 @@
 
 ## 前置检查
 
-1. 更新 `CHANGELOG.md`，确认 core provider live 检查通过。
+1. 更新 `CHANGELOG.md`，确认 jkv-catalog 仓库的镜像健康检查通过。
 2. 使用工作流固定的 Go 1.26.5（或更新安全补丁版）运行 `gofmt`、`go vet`、`staticcheck`、`govulncheck`、完整测试与六目标交叉编译。`go.mod` 的 1.24 是源码兼容基线，不是发布工具链版本。
 3. 创建公开 CNB 仓库后，配置 GitHub Variables：`CNB_JKV_REPOSITORY=<CNB 组织>/<CNB 仓库>` 与 `JKV_CN_DOWNLOAD_BASE=https://cnb.cool/<CNB 组织>/<CNB 仓库>/-/releases/download`。后者必须严格等于该仓库的 CNB Release download 根；不含 tag。
 4. 配置 GitHub Secret `CNB_JKV_TOKEN`。它必须是具备该 CNB 仓库 Release 创建和附件上传权限的访问令牌；不要使用只读部署令牌。

@@ -36,7 +36,34 @@ type Store struct {
 var (
 	ErrIntegrity = errors.New("完整性校验失败")
 	ErrNetwork   = errors.New("下载网络错误")
+	// ErrState marks local state conflicts: already installed, lock contention,
+	// refused overwrites and trusted-catalog rollback refusals.
+	ErrState = errors.New("本地状态冲突")
+	// ErrNotFound marks missing versions, defaults or artifacts.
+	ErrNotFound = errors.New("未找到")
 )
+
+// stateError keeps the wrapped message unchanged while still matching
+// errors.Is(err, ErrState) so exit codes stay string-independent.
+type stateError struct{ err error }
+
+func (e *stateError) Error() string        { return e.err.Error() }
+func (e *stateError) Unwrap() error        { return e.err }
+func (e *stateError) Is(target error) bool { return target == ErrState }
+
+func stateErrorf(format string, args ...any) error { return &stateError{fmt.Errorf(format, args...)} }
+
+// notFoundError marks missing versions, defaults or artifacts without
+// altering the user-facing message.
+type notFoundError struct{ err error }
+
+func (e *notFoundError) Error() string        { return e.err.Error() }
+func (e *notFoundError) Unwrap() error        { return e.err }
+func (e *notFoundError) Is(target error) bool { return target == ErrNotFound }
+
+func notFoundErrorf(format string, args ...any) error {
+	return &notFoundError{fmt.Errorf(format, args...)}
+}
 
 type InstallOptions struct {
 	RequireChecksum bool
@@ -84,7 +111,7 @@ func (s *Store) CandidateDir(candidate, version string) string {
 func (s *Store) Home(candidate, version string) (string, error) {
 	d := s.CandidateDir(candidate, version)
 	if st, err := os.Stat(d); err != nil || !st.IsDir() {
-		return "", fmt.Errorf("未安装 %s %s", candidate, version)
+		return "", notFoundErrorf("未安装 %s %s", candidate, version)
 	}
 	if candidate == "java" {
 		macHome := filepath.Join(d, "Contents", "Home")
@@ -137,7 +164,7 @@ func (s *Store) InstallWithOptions(ctx context.Context, r catalog.Release, progr
 	_, statErr := os.Stat(dest)
 	exists := statErr == nil
 	if options.Repair && !exists {
-		return fmt.Errorf("未安装 %s %s", r.Candidate, r.Version)
+		return notFoundErrorf("未安装 %s %s", r.Candidate, r.Version)
 	}
 	if exists && !options.Repair {
 		if s.installationMatches(dest, r) {
@@ -146,7 +173,7 @@ func (s *Store) InstallWithOptions(ctx context.Context, r catalog.Release, progr
 			}
 			return nil
 		}
-		return fmt.Errorf("已安装 %s %s", r.Candidate, r.Version)
+		return stateErrorf("已安装 %s %s", r.Candidate, r.Version)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
@@ -199,7 +226,7 @@ type fileLock struct {
 
 func (s *Store) acquireLock(ctx context.Context, name string) (*fileLock, error) {
 	if !validSegment(name) {
-		return nil, errors.New("无效锁名称")
+		return nil, stateErrorf("无效锁名称")
 	}
 	dir := filepath.Join(s.Root, "locks")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -227,7 +254,7 @@ func (s *Store) acquireLock(ctx context.Context, name string) (*fileLock, error)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, fmt.Errorf("等待锁失败: %w", ctx.Err())
+			return nil, stateErrorf("等待锁失败: %w", ctx.Err())
 		case <-timer.C:
 		}
 	}
@@ -251,22 +278,22 @@ func (s *Store) installationMatches(dest string, release catalog.Release) bool {
 
 func (s *Store) InstalledRelease(candidate, version string) (catalog.Release, error) {
 	if !validSegment(candidate) || !validSegment(version) {
-		return catalog.Release{}, errors.New("无效 candidate 或版本")
+		return catalog.Release{}, stateErrorf("无效 candidate 或版本")
 	}
 	path := filepath.Join(s.CandidateDir(candidate, version), ".jkv-release.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return catalog.Release{}, fmt.Errorf("读取安装元数据失败: %w", err)
+		return catalog.Release{}, notFoundErrorf("读取安装元数据失败: %w", err)
 	}
 	var installed metadata
 	if err := json.Unmarshal(b, &installed); err != nil {
-		return catalog.Release{}, fmt.Errorf("读取安装元数据失败: %w", err)
+		return catalog.Release{}, notFoundErrorf("读取安装元数据失败: %w", err)
 	}
 	if installed.SchemaVersion > stateSchemaVersion {
-		return catalog.Release{}, fmt.Errorf("不支持安装 schema %d", installed.SchemaVersion)
+		return catalog.Release{}, stateErrorf("不支持安装 schema %d", installed.SchemaVersion)
 	}
 	if installed.Release.Candidate != candidate || installed.Release.Version != version || installed.Release.URL == "" {
-		return catalog.Release{}, errors.New("安装元数据无效")
+		return catalog.Release{}, stateErrorf("安装元数据无效")
 	}
 	return installed.Release, nil
 }
@@ -948,7 +975,7 @@ func (s *Store) Remove(candidate, version string) error {
 	defer lock.release()
 	home := s.CandidateDir(candidate, version)
 	if _, err := os.Stat(home); err != nil {
-		return fmt.Errorf("未安装 %s %s", candidate, version)
+		return notFoundErrorf("未安装 %s %s", candidate, version)
 	}
 	if err := os.RemoveAll(home); err != nil {
 		return err

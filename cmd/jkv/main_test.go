@@ -4,23 +4,108 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/fishandsheep/jkv/internal/catalog"
 	"github.com/fishandsheep/jkv/internal/store"
 )
+
+type testSnapshotRelease struct {
+	candidate string
+	vendor    string
+	version   string
+	selector  string
+	url       string
+	tier      string
+}
+
+// seedTrustedCatalog stores a signed, locally trusted catalog snapshot so
+// tests can drive list/install/completion through the signed path without
+// network access.
+func seedTrustedCatalog(t *testing.T, s *store.Store, sequence uint64, releases ...testSnapshotRelease) {
+	t.Helper()
+	keyID := "main-test-key"
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JKV_CATALOG_KEY_ID", keyID)
+	t.Setenv("JKV_CATALOG_PUBLIC_KEY", base64.StdEncoding.EncodeToString(private.Public().(ed25519.PublicKey)))
+
+	allPlatforms := []catalog.Platform{
+		{OS: "linux", Arch: "x64"}, {OS: "linux", Arch: "aarch64"},
+		{OS: "darwin", Arch: "x64"}, {OS: "darwin", Arch: "aarch64"},
+		{OS: "windows", Arch: "x64"}, {OS: "windows", Arch: "aarch64"},
+	}
+	releasesByVendor := map[string]map[string][]catalog.SnapshotRelease{}
+	firstVendor := map[string]string{}
+	for _, item := range releases {
+		if releasesByVendor[item.candidate] == nil {
+			releasesByVendor[item.candidate] = map[string][]catalog.SnapshotRelease{}
+		}
+		if _, seen := firstVendor[item.candidate]; !seen {
+			firstVendor[item.candidate] = item.vendor
+		}
+		releasesByVendor[item.candidate][item.vendor] = append(releasesByVendor[item.candidate][item.vendor], catalog.SnapshotRelease{
+			Version: item.version, Selector: item.selector, SupportTier: item.tier,
+			Artifacts: []catalog.Artifact{{
+				ArtifactID:  fmt.Sprintf("%s/%s/%s/all/r1", item.candidate, item.vendor, item.version),
+				ArchiveType: "zip",
+				Platforms:   allPlatforms,
+				URL:         item.url,
+			}},
+		})
+	}
+
+	snapshot := catalog.Snapshot{SchemaVersion: 1, Sequence: sequence, PublishedAt: "2026-07-30T12:00:00Z", SourceCommit: "0123456789abcdef0123456789abcdef01234567", MinClientVersion: "0.0.1"}
+	for _, name := range sortedKeys(releasesByVendor) {
+		candidate := catalog.SnapshotCandidate{Name: name, DisplayName: name, Description: name + " (test fixture)", Homepage: "https://example.test/" + name, DefaultVendor: firstVendor[name]}
+		for _, vendorName := range sortedKeys(releasesByVendor[name]) {
+			candidate.Vendors = append(candidate.Vendors, catalog.Vendor{Name: vendorName, DisplayName: vendorName, Releases: releasesByVendor[name][vendorName]})
+		}
+		snapshot.Candidates = append(snapshot.Candidates, candidate)
+	}
+	snapshotBytes, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(snapshotBytes)
+	latestBytes, err := json.Marshal(catalog.Latest{SchemaVersion: 1, Sequence: sequence, SnapshotSHA256: hex.EncodeToString(digest[:]), ReleaseTag: fmt.Sprintf("catalog-v1-%06d", sequence), SnapshotAsset: "catalog-v1.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched := catalog.FetchedSnapshot{
+		Endpoint:          "test",
+		KeyIDs:            []string{keyID},
+		Snapshot:          snapshot,
+		SnapshotBytes:     snapshotBytes,
+		SnapshotSignature: signedDocument(t, snapshotBytes, private, keyID),
+		LatestBytes:       latestBytes,
+		LatestSignature:   signedDocument(t, latestBytes, private, keyID),
+	}
+	state, stateErr := s.LoadTrustedCatalog()
+	if stateErr != nil && !os.IsNotExist(stateErr) {
+		t.Fatal(stateErr)
+	}
+	if err := saveFetchedCatalog(s, state, fetched); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestSelectReleaseAlias(t *testing.T) {
 	releases := []catalog.Release{
@@ -109,10 +194,7 @@ func TestListJSONIncludesInstalledOnlyContract(t *testing.T) {
 	if err := os.MkdirAll(s.CandidateDir("springboot", localVersion), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	remote := catalog.Release{Candidate: "springboot", Version: "3.5.1", Vendor: "spring", URL: "https://example.test/spring.zip", Available: true, AvailabilityKnown: true, AvailabilityStatus: "available"}
-	if err := s.SaveCatalog(catalog.CurrentPlatform(), "springboot", store.CatalogCache{FetchedAt: time.Now(), CheckedAt: time.Now(), Releases: []catalog.Release{remote}}); err != nil {
-		t.Fatal(err)
-	}
+	seedTrustedCatalog(t, s, 1, testSnapshotRelease{candidate: "springboot", vendor: "spring", version: "3.5.1", selector: "3.5.1", url: "https://example.test/spring.zip", tier: "core"})
 	jsonContext := context.WithValue(context.Background(), cliOptionsKey{}, cliOptions{JSON: true})
 	output := captureStdout(t, func() error { return cmdList(jsonContext, s, []string{"springboot"}) })
 	var got []map[string]any
@@ -140,16 +222,10 @@ func TestInstalledVersionCompletionSupportsAliases(t *testing.T) {
 
 func TestInstallVersionCompletionUsesCatalogCache(t *testing.T) {
 	s := store.New(t.TempDir())
-	cache := store.CatalogCache{
-		FetchedAt: time.Now(),
-		Releases: []catalog.Release{
-			{Candidate: "java", Version: "21.0.8+9-tem", Vendor: "temurin"},
-			{Candidate: "java", Version: "17.0.16+8-tem", Vendor: "temurin"},
-		},
-	}
-	if err := s.SaveCatalog(catalog.CurrentPlatform(), "java", cache); err != nil {
-		t.Fatal(err)
-	}
+	seedTrustedCatalog(t, s, 1,
+		testSnapshotRelease{candidate: "java", vendor: "temurin", version: "21.0.8+9", selector: "21.0.8+9-tem", url: "https://example.test/jdk21.tar.gz", tier: "core"},
+		testSnapshotRelease{candidate: "java", vendor: "temurin", version: "17.0.16+8", selector: "17.0.16+8-tem", url: "https://example.test/jdk17.tar.gz", tier: "core"},
+	)
 
 	got := completions(context.Background(), s, []string{"install", "java", "21"})
 	want := []string{"21.0.8+9-tem"}
@@ -196,13 +272,6 @@ func TestCompletionCoversEveryCandidateAndCommandAlias(t *testing.T) {
 		if err := os.MkdirAll(s.CandidateDir(candidate, version), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		cache := store.CatalogCache{
-			FetchedAt: time.Now(),
-			Releases:  []catalog.Release{{Candidate: candidate, Version: version}},
-		}
-		if err := s.SaveCatalog(catalog.CurrentPlatform(), candidate, cache); err != nil {
-			t.Fatal(err)
-		}
 		downloadDir := filepath.Join(s.Root, "cache", "downloads", candidate, version)
 		if err := os.MkdirAll(downloadDir, 0o755); err != nil {
 			t.Fatal(err)
@@ -221,6 +290,13 @@ func TestCompletionCoversEveryCandidateAndCommandAlias(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	specs := make([]testSnapshotRelease, 0, len(catalog.Candidates))
+	for i, candidate := range catalog.Candidates {
+		version := fmt.Sprintf("%d.0-%s", i+1, candidate.Name)
+		specs = append(specs, testSnapshotRelease{candidate: candidate.Name, vendor: candidate.Name, version: version, selector: version, url: "https://example.test/" + candidate.Name + ".zip", tier: "core"})
+	}
+	seedTrustedCatalog(t, s, 1, specs...)
 
 	for _, command := range []string{"list", "ls", "install", "i", "use", "u", "default", "d", "current", "c", "uninstall", "rm", "home", "h"} {
 		got := completions(context.Background(), s, []string{command, ""})
@@ -250,7 +326,7 @@ func TestCompletionCoversEveryCandidateAndCommandAlias(t *testing.T) {
 	}
 
 	for _, command := range []string{"clean", "cl"} {
-		for _, kind := range []string{"downloads", "catalog"} {
+		for _, kind := range []string{"downloads"} {
 			got := completions(context.Background(), s, []string{command, kind, ""})
 			for candidate := range versions {
 				if !slices.Contains(got, candidate) {
@@ -283,7 +359,7 @@ func TestCompletionCoversEveryTopLevelNameAndStaticArgument(t *testing.T) {
 		{[]string{"env", "e"}, []string{"apply", "clear", "defaults", "init"}},
 		{[]string{"init", "in"}, []string{"bash", "fish", "powershell", "pwsh", "zsh"}},
 		{[]string{"mirror", "m"}, []string{"gradle", "maven", "status"}},
-		{[]string{"clean", "cl"}, []string{"--dry-run", "--older-than", "catalog", "downloads", "partials"}},
+		{[]string{"clean", "cl"}, []string{"--dry-run", "--older-than", "downloads", "partials"}},
 	}
 	for _, test := range tests {
 		for _, command := range test.commands {
@@ -298,13 +374,7 @@ func TestCompletionCoversEveryTopLevelNameAndStaticArgument(t *testing.T) {
 func TestCompletionSupportsListAndInstallOptionsBeforePositionals(t *testing.T) {
 	s := store.New(t.TempDir())
 	version := "3.9.11"
-	cache := store.CatalogCache{
-		FetchedAt: time.Now(),
-		Releases:  []catalog.Release{{Candidate: "maven", Version: version}},
-	}
-	if err := s.SaveCatalog(catalog.CurrentPlatform(), "maven", cache); err != nil {
-		t.Fatal(err)
-	}
+	seedTrustedCatalog(t, s, 1, testSnapshotRelease{candidate: "maven", vendor: "maven", version: version, selector: version, url: "https://example.test/maven.zip", tier: "core"})
 
 	for _, args := range [][]string{
 		{"list", "--refresh", ""},
@@ -525,13 +595,17 @@ func TestExitCodeCategories(t *testing.T) {
 		err  error
 		want int
 	}{
-		{errors.New("用法: jkv install <candidate>"), 2},
-		{errors.New("未安装 java 21"), 3},
-		{errors.New("下载失败: HTTP 503 Service Unavailable"), 4},
-		{errors.New("SHA-256 不匹配"), 5},
-		{errors.New("已安装 java 21"), 6},
-		{fmt.Errorf("dial failed: %w", catalog.ErrNetwork), 4},
-		{fmt.Errorf("bad archive: %w", store.ErrIntegrity), 5},
+		{usageErrorf("用法: jkv install <工具>"), exitUsage},
+		{usageErrorf("wrapped: %w", errors.New("任意内层错误")), exitUsage},
+		{notFoundErrorf("未安装 java 21"), exitNotFound},
+		{stateErrorf("已存在且内容不同，拒绝覆盖"), exitState},
+		{fmt.Errorf("网络: %w", store.ErrNetwork), exitNetwork},
+		{fmt.Errorf("镜像重试: %w", store.ErrNetwork), exitNetwork},
+		{fmt.Errorf("bad archive: %w", store.ErrIntegrity), exitIntegrity},
+		{fmt.Errorf("回滚拒绝: %w", store.ErrState), exitState},
+		{fmt.Errorf("缺失: %w", store.ErrNotFound), exitNotFound},
+		{&catalog.DownloadError{Endpoint: "CNB", Err: errors.New("connection refused")}, exitNetwork},
+		{errors.New("完全未分类错误"), 1},
 	}
 	for _, test := range tests {
 		if got := exitCodeFor(test.err); got != test.want {
@@ -619,15 +693,45 @@ func TestEnvMirrorCleanAndInitCommands(t *testing.T) {
 	}
 	if got := captureStdout(t, func() error {
 		return cmdEnv(s, []string{"clear", "--shell", "powershell"})
-	}); !strings.Contains(got, "$env:JKV_DIR") {
-		t.Fatalf("powershell env = %q", got)
+	}); !strings.Contains(got, "Remove-Item Env:JAVA_HOME") || !strings.Contains(got, "Remove-Item Env:JKV_CURRENT_JAVA") {
+		t.Fatalf("powershell clear = %q", got)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdEnv(s, []string{"clear", "--shell", "bash"})
+	}); !strings.Contains(got, "unset ANT_HOME") || !strings.Contains(got, "JKV_CURRENT_JAVA") || !strings.Contains(got, `PATH=":$PATH:"`) {
+		t.Fatalf("bash clear = %q", got)
 	}
 
-	if err := cmdMirror(context.Background(), []string{"maven"}); err != nil {
+	if got := captureStdout(t, func() error {
+		return cmdMirror(context.Background(), []string{"maven"})
+	}); !strings.Contains(got, "预览") || !strings.Contains(got, "--apply") {
+		t.Fatalf("maven mirror preview = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".m2", "settings-jkv.xml")); !os.IsNotExist(err) {
+		t.Fatalf("maven preview wrote settings-jkv.xml: %v", err)
+	}
+	if err := cmdMirror(context.Background(), []string{"maven", "--apply"}); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".m2", "settings-jkv.xml")); err != nil {
+		t.Fatalf("maven apply missing settings-jkv.xml: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".m2", "settings.xml")); err != nil {
+		t.Fatalf("maven apply missing settings.xml: %v", err)
+	}
+	if got := captureStdout(t, func() error {
+		return cmdMirror(context.Background(), []string{"gradle"})
+	}); !strings.Contains(got, "预览") {
+		t.Fatalf("gradle mirror preview = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gradle", "init.d", "jkv-mirrors.gradle")); !os.IsNotExist(err) {
+		t.Fatalf("gradle preview wrote init.d file: %v", err)
 	}
 	if err := cmdMirror(context.Background(), []string{"gradle", "--apply"}); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gradle", "init.d", "jkv-mirrors.gradle")); err != nil {
+		t.Fatalf("gradle apply missing init.d file: %v", err)
 	}
 	jsonContext := context.WithValue(context.Background(), cliOptionsKey{}, cliOptions{JSON: true})
 	if got := captureStdout(t, func() error {
@@ -679,21 +783,27 @@ func TestListInstallRepairAndCompletion(t *testing.T) {
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(archive.Bytes())
-	}))
-	defer server.Close()
-
 	root := t.TempDir()
 	t.Setenv("JKV_DIR", root)
 	s := store.New(root)
-	release := catalog.Release{
-		Candidate: "maven", Version: "3.9.11", Vendor: "maven", SupportTier: "core",
-		URL: server.URL + "/maven.zip", Available: true, AvailabilityKnown: true,
+	seedTrustedCatalog(t, s, 1, testSnapshotRelease{candidate: "maven", vendor: "maven", version: "3.9.11", selector: "3.9.11", url: "https://example.test/maven.zip", tier: "core"})
+	digest := sha256.Sum256(archive.Bytes())
+	cacheArchive := filepath.Join(s.Root, "cache", "downloads", "maven", "3.9.11", "archive")
+	if err := os.MkdirAll(filepath.Dir(cacheArchive), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if err := s.SaveCatalog(catalog.CurrentPlatform(), "maven", store.CatalogCache{
-		FetchedAt: time.Now(), CheckedAt: time.Now(), Releases: []catalog.Release{release},
-	}); err != nil {
+	if err := os.WriteFile(cacheArchive, archive.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheMetadata, err := json.Marshal(struct {
+		SchemaVersion int             `json:"schema_version"`
+		Release       catalog.Release `json:"release"`
+		SHA256        string          `json:"sha256"`
+	}{SchemaVersion: 1, Release: catalog.Release{Candidate: "maven", Version: "3.9.11", URL: "https://example.test/maven.zip"}, SHA256: hex.EncodeToString(digest[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(cacheArchive), "metadata.json"), cacheMetadata, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if got := captureStdout(t, func() error {
@@ -744,10 +854,6 @@ func TestFormattingAndOptionHelpers(t *testing.T) {
 	if shQuote("a'b") != `'a'\''b'` || psQuote("a'b") != "'a''b'" || fishQuote("a'b") != `'a\'b'` {
 		t.Fatal("shell quoting failed")
 	}
-	if releasesNeedCheck([]catalog.Release{{AvailabilityKnown: true}}) ||
-		!releasesNeedCheck([]catalog.Release{{AvailabilityKnown: false}}) {
-		t.Fatal("availability classification failed")
-	}
 }
 
 func envEnabledValue(t *testing.T, value string) bool {
@@ -776,4 +882,81 @@ func captureStdout(t *testing.T, fn func() error) string {
 		t.Fatal(readErr)
 	}
 	return string(b)
+}
+
+func TestEveryCommandSupportsHelpFlag(t *testing.T) {
+	for alias, command := range commandAliases {
+		if command == "help" {
+			continue
+		}
+		output := captureStdout(t, func() error {
+			return run(context.Background(), []string{alias, "--help"})
+		})
+		if !strings.Contains(output, "用法") {
+			t.Errorf("%s --help lacks usage text: %q", alias, output)
+		}
+		if !printCommandHelp(command) {
+			t.Errorf("no help entry for command %q", command)
+		}
+	}
+}
+
+func TestUserFacingErrorsSayToolInsteadOfCandidate(t *testing.T) {
+	s := store.New(t.TempDir())
+	cleanErr := cmdClean(context.Background(), s, []string{"downloads", "notatool"})
+	if cleanErr == nil || !strings.Contains(cleanErr.Error(), `不支持工具 "notatool"`) {
+		t.Fatalf("clean error = %v", cleanErr)
+	}
+	_, _, shellErr := shellFlag([]string{"use", "a/b", "21"})
+	if shellErr != nil {
+		t.Fatal(shellErr)
+	}
+	if _, err := installedMatch(s, "a/b", "21"); err == nil || !strings.Contains(err.Error(), "不支持工具") {
+		t.Fatalf("installedMatch error = %v", err)
+	}
+	cleanErr2 := usageErrorf("不支持工具 %q", "x")
+	if got := exitCodeFor(cleanErr2); got != exitUsage {
+		t.Fatalf("exitCodeFor(不支持工具) = %d", got)
+	}
+}
+
+func TestSelectReleasePrefersTemurinAcrossVendors(t *testing.T) {
+	releases := []catalog.Release{
+		{Candidate: "java", Version: "21.0.1-dragonwell", Vendor: "dragonwell"},
+		{Candidate: "java", Version: "21.0.8+9-tem", Vendor: "temurin"},
+		{Candidate: "java", Version: "21.0.2-bisheng", Vendor: "bisheng"},
+		{Candidate: "java", Version: "17.0.12+11-tem", Vendor: "temurin"},
+	}
+	got, err := selectRelease(releases, "21")
+	if err != nil || got.Version != "21.0.8+9-tem" {
+		t.Fatalf("prefix 21 = %#v, %v; want temurin", got, err)
+	}
+	got, err = selectRelease(releases, "21-dragonwell")
+	if err != nil || got.Vendor != "dragonwell" {
+		t.Fatalf("explicit vendor = %#v, %v", got, err)
+	}
+	got, err = selectRelease(releases, "17")
+	if err != nil || got.Version != "17.0.12+11-tem" {
+		t.Fatalf("single-vendor prefix = %#v, %v", got, err)
+	}
+}
+
+func TestListDefaultColumnsHideGovernanceDetail(t *testing.T) {
+	s := store.New(t.TempDir())
+	seedTrustedCatalog(t, s, 1, testSnapshotRelease{candidate: "java", vendor: "temurin", version: "21.0.8+9", selector: "21.0.8+9-tem", url: "https://example.test/jdk.tar.gz", tier: "core"})
+	plain := captureStdout(t, func() error {
+		return cmdList(context.Background(), s, []string{"java"})
+	})
+	if !strings.Contains(plain, "AVAILABLE") || strings.Contains(plain, "TIER") || strings.Contains(plain, "INTEGRITY") {
+		t.Fatalf("default columns = %q", plain)
+	}
+	verboseContext := context.WithValue(context.Background(), cliOptionsKey{}, cliOptions{Verbose: true})
+	detailed := captureStdout(t, func() error {
+		return cmdList(verboseContext, s, []string{"java"})
+	})
+	for _, want := range []string{"TIER", "INTEGRITY", "SOURCE"} {
+		if !strings.Contains(detailed, want) {
+			t.Fatalf("verbose columns missing %s: %q", want, detailed)
+		}
+	}
 }

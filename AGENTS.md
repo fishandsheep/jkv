@@ -6,10 +6,9 @@
 
 ## Build, Test, and Development Commands
 
-- `go run ./cmd/jkv list java` runs the CLI from source and exercises live catalog discovery.
 - `go build ./cmd/jkv` builds the local executable.
-- `go test ./...` runs all unit and live mirror tests.
-- `go test -short ./...` skips network-dependent tests such as `TestDragonwellLive`.
+- `go test ./...` runs all tests; the suite runs fully offline against local signed-catalog fixtures.
+- Source builds have no compiled-in catalog trust key. `go run ./cmd/jkv list` shows the built-in tool table; `go run ./cmd/jkv list java` needs `JKV_CATALOG_KEY_ID` and `JKV_CATALOG_PUBLIC_KEY` (the signing key pair is owned by the maintainers).
 - `go vet ./...` performs the static checks required by CI.
 - `gofmt -w cmd internal` formats Go sources before submission.
 - `./install.sh` or `.\install.ps1` builds and installs from a source checkout.

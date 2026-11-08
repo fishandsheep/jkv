@@ -30,7 +30,7 @@
 
 - Beta 运行至少 8 周。
 - 六客户端平台无未解决 P0/P1。
-- core provider 连续 30 天稳定。
+- core 工具的 Catalog 条目与镜像连续 30 天稳定。
 - 至少 10 名非作者完成真实安装任务。
 - CLI、配置与 catalog schema 完成兼容性审查。
 - 安全、卸载、repair 和回滚路径完成真实验证。

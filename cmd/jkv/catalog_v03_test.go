@@ -69,8 +69,6 @@ func TestLoadSignedSnapshotUsesReleaseLayoutAndTrustedCache(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	t.Setenv("JKV_EXPERIMENTAL_CATALOG", "true")
-	t.Setenv("JKV_LEGACY_PROVIDER", "false")
 	t.Setenv("JKV_CATALOG_KEY_ID", keyID)
 	t.Setenv("JKV_CATALOG_PUBLIC_KEY", base64.StdEncoding.EncodeToString(private.Public().(ed25519.PublicKey)))
 	t.Setenv("JKV_CATALOG_ENDPOINT", server.URL+"/download")
