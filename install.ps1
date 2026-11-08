@@ -4,10 +4,33 @@ param(
   [switch]$NoModifyProfile,
   [switch]$Uninstall,
   [switch]$Purge,
-  [switch]$Yes
+  [switch]$Yes,
+  [switch]$Help
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($Help) {
+  @'
+jkv 安装器（Windows PowerShell）
+
+用法: irm <安装地址> | iex                        # 默认安装到 ~\.jkv
+      ./install.ps1 [-InstallDir <目录>] [-NoModifyProfile]
+                    [-Uninstall] [-Purge] [-Yes] [-Help]
+
+选项:
+  -InstallDir       安装目录（默认 $env:JKV_DIR 或 ~\.jkv）
+  -NoModifyProfile  不写入 PowerShell profile
+  -Uninstall        卸载 jkv；保留已安装工具、默认值与缓存
+  -Purge            卸载并删除整个安装目录（危险，需确认）
+  -Yes              非交互环境确认 -Purge
+  -Help             显示本帮助并退出
+
+安装优先 CNB，失败回退 GitHub；校验和不匹配直接终止。
+'@ | Write-Output
+  exit 0
+}
+
 $managedBegin = '# >>> jkv managed >>>'
 $managedEnd = '# <<< jkv managed <<<'
 $modifyProfile = -not $NoModifyProfile -and $env:JKV_MODIFY_PROFILE -ne '0'

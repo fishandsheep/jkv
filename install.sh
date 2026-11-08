@@ -1,6 +1,25 @@
 #!/bin/sh
 set -eu
 
+usage() {
+  cat <<'USAGE'
+jkv 安装器
+
+用法: sh install.sh [--no-modify-profile] [--uninstall] [--purge] [--yes] [-h|--help]
+
+选项:
+  --no-modify-profile  不写入 shell 配置（自行加载 jkv init 输出）
+  --uninstall          卸载 jkv；保留已安装工具、默认值与缓存
+  --purge              卸载并删除整个 JKV_DIR（危险，需确认）
+  --yes                非交互环境确认 --purge
+  -h, --help           显示本帮助并退出
+
+环境变量: JKV_DIR（安装目录，默认 ~/.jkv）、JKV_VERSION、JKV_DOWNLOAD_BASE、
+JKV_FALLBACK_BASE、JKV_REPO 可覆盖下载来源；安装优先 CNB，失败回退 GitHub，
+校验和不匹配直接终止。
+USAGE
+}
+
 JKV_DIR=${JKV_DIR:-"$HOME/.jkv"}
 JKV_REPO=${JKV_REPO:-fishandsheep/jkv}
 MANAGED_BEGIN='# >>> jkv managed >>>'
@@ -16,7 +35,8 @@ while [ "$#" -gt 0 ]; do
     --uninstall) action=uninstall ;;
     --purge) action=uninstall; purge=true ;;
     --yes) assume_yes=true ;;
-    *) echo "未知安装器选项: $1" >&2; exit 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "未知安装器选项: $1（--help 查看用法）" >&2; exit 2 ;;
   esac
   shift
 done
